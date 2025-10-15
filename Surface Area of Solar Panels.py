@@ -6,8 +6,8 @@ from matplotlib.ticker import MultipleLocator
 # Parameters 
 A_max = 100   # surface area at 0 degrees as a percentage
 A_min = 0    # surface area at 90 degrees as a percentage
-occlusion_start = 169.8  # angle at which satellite first cannot be seen
-occlusion_end   = 190.2  # angle at which satellite re-emerges
+occlusion_start = 135.05  # angle at which satellite first cannot be seen
+occlusion_end   = 224.95  # angle at which satellite re-emerges
 
 # Angle array
 theta_deg = np.linspace(0, 360, 2000)
@@ -54,4 +54,5 @@ plt.ylabel('Visible surface area, A(θ) (m²)')
 plt.xlim(0, 24)
 plt.ylim(0, A_max * 1.05)
 plt.grid(alpha=0.3)
+
 plt.show()
