@@ -54,5 +54,6 @@ plt.ylabel('Visible surface area, A(θ) (m²)')
 plt.xlim(0, 24)
 plt.ylim(0, A_max * 1.05)
 plt.grid(alpha=0.3)
-
 plt.show()
+
+print(f"The satellite is in the Earths shadow between t = {occlusion_start_time:.2f} hours and t = {occlusion_end_time:.2f} hours.")
