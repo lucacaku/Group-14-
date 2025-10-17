@@ -1,0 +1,191 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from matplotlib.animation import FuncAnimation
+import matplotlib.cm as cm
+
+# Orbital system properties
+r_earth = 0.3
+r_orbit = 0.5
+period = 5.0
+fps = 30
+
+frames = int(period * fps)
+omega = 4 * np.pi / period
+t = np.linspace(0, period, frames)
+
+# --- Coordinate scaling ---
+# Move Sun far to the right (~15 units away), Earth near origin, satellite orbit around Earth
+sun = np.array([15.0, 0.0])
+earth_center = np.array([0.0, 0.0])
+earth_eclp = np.array([0.6, 0.0])
+r_earth = 0.3
+r_orbit = 0.5
+
+# Satellite orbital path around Earth
+x_sat = earth_center[0] + r_orbit * np.cos(omega * t)
+y_sat = earth_center[1] + r_orbit * np.sin(omega * t)
+
+# Geometry of sunlight/earth cone
+d = np.linalg.norm(earth_center - sun)
+cone_widen_factor = 20.0
+cone_widen_factor_e = 10.0
+alpha = cone_widen_factor * np.arcsin(r_earth / d)
+alpha_e = cone_widen_factor_e * np.arcsin(r_earth / d) - .6
+axis = (earth_center - sun) / d
+
+def rotate(v, ang):
+    c, s = np.cos(ang), np.sin(ang)
+    return np.array([[c, -s], [s, c]]) @ v
+
+edge_dir1 = rotate(axis, alpha)
+edge_dir2 = rotate(axis, -alpha)
+edge_dir1_e = rotate(axis, alpha_e)
+edge_dir2_e = rotate(axis, -alpha_e)
+cone_far = 200.0  # longer cone for distant Sun
+cone_points = np.array([sun,
+                        sun + edge_dir1 * cone_far,
+                        sun + edge_dir2 * cone_far])
+cone_points_earth = np.array([earth_eclp,
+                              earth_eclp + edge_dir1_e * cone_far,
+                              earth_eclp + edge_dir2_e * cone_far])
+
+# Physical constants
+sigma = 5.67e-8
+S = 1361
+alpha_s = 0.6
+epsilon = 0.8
+A = 55.4
+m = 50.0
+cp = 900.0
+C = m * cp
+time_scale = 1200.0
+
+# Shadow test
+def segment_intersects_circle(p0, p1, center, radius):
+    p0, p1, c = np.array(p0, float), np.array(p1, float), np.array(center, float)
+    d_vec = p1 - p0
+    A_coef = np.dot(d_vec, d_vec)
+    B_coef = 2 * np.dot(d_vec, p0 - c)
+    C_coef = np.dot(p0 - c, p0 - c) - radius**2
+    disc = B_coef**2 - 4*A_coef*C_coef
+    if disc < 0:
+        return False
+    sqrt_disc = np.sqrt(disc)
+    t1 = (-B_coef - sqrt_disc) / (2*A_coef)
+    t2 = (-B_coef + sqrt_disc) / (2*A_coef)
+    eps = 1e-8
+    return (eps < t1 < 1 - eps) or (eps < t2 < 1 - eps)
+
+# Temperature and power arrays
+T = np.empty_like(t)
+T[0] = 375
+P = np.zeros_like(t)
+
+dt = t[1] - t[0]
+
+# Solar panel properties
+A_panel = 20.0 
+alpha_p = 0.9
+epsilon_p = 0.85
+eta_panel = 0.99
+A_total = A + A_panel
+
+sun_dir = (sun - earth_center) / np.linalg.norm(sun - earth_center)
+
+for i in range(1, len(t)):
+    sat_pos = np.array([x_sat[i], y_sat[i]])
+    in_shadow = segment_intersects_circle(sun, sat_pos, earth_center, r_earth)
+
+    to_sun = sun - sat_pos
+    to_sun /= np.linalg.norm(to_sun)
+
+    radial_dir = sat_pos / np.linalg.norm(sat_pos)
+    cos_theta = np.dot(to_sun, radial_dir)
+    cos_theta = max(cos_theta, 0.0)
+
+    if not in_shadow:
+        Qin_sat = alpha_s * S * A
+        Qin_panel = alpha_p * S * A_panel * cos_theta
+        P[i] = eta_panel * S * A_panel * cos_theta
+    else:
+        Qin_sat = 0.0
+        Qin_panel = 0.0
+        P[i] = 0.0
+
+    Qin_total = Qin_sat + Qin_panel
+    Qout_sat = epsilon * sigma * A * T[i-1]**4
+    Qout_panel = epsilon_p * sigma * A_panel * T[i-1]**4
+    Qout_total = Qout_sat + Qout_panel
+
+    dTdt = (Qin_total - Qout_total) / C
+    if in_shadow:
+        dTdt -= 0.002 * (T[i-1] - 250)
+
+    T[i] = T[i-1] + dTdt * dt * time_scale
+ 
+       
+P[0] = eta_panel * S * A_panel * cos_theta
+# Plot setup
+vmin, vmax = np.min(T)-5, np.max(T)+5
+cmap = cm.get_cmap('coolwarm')
+norm = plt.Normalize(vmin=vmin, vmax=vmax)
+
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16,6))
+fig.patch.set_facecolor('white')
+
+# --- Orbit plot ---
+ax1.grid(True, color='grey', alpha=0.3, linestyle='--')
+ax1.set_title('Satellite Orbit (2D, Scaled Sun–Earth Distance)')
+ax1.set_aspect('equal')
+ax1.set_xlim(-6, 18)
+ax1.set_ylim(-8, 8)
+
+# Draw Sun, Earth, and cone
+ax1.fill(sun[0] + 1.5*np.cos(np.linspace(0, 2*np.pi, 200)),
+         sun[1] + 1.5*np.sin(np.linspace(0, 2*np.pi, 200)),
+         color='gold', alpha=0.9, zorder=5)
+ax1.fill(cone_points[:,0], cone_points[:,1], color='gold', alpha=0.08, zorder=1)
+ax1.fill(cone_points_earth[:,0], cone_points_earth[:,1], color='green', alpha=.05, zorder=1)
+ax1.fill(earth_center[0] + r_earth*np.cos(np.linspace(0, 2*np.pi, 200)),
+         earth_center[1] + r_earth*np.sin(np.linspace(0, 2*np.pi, 200)),
+         color='royalblue', zorder=6)
+ax1.plot(earth_center[0] + r_orbit*np.cos(np.linspace(0, 2*np.pi, 200)),
+         earth_center[1] + r_orbit*np.sin(np.linspace(0, 2*np.pi, 200)), '--', color='gray', alpha=0.6)
+
+ax1.text(sun[0], sun[1]+2, "Sun", color='darkorange', ha='center', fontweight='bold')
+ax1.text(earth_center[0], earth_center[1]+0.9, "Earth", color='royalblue', ha='center', fontweight='bold')
+ax1.text(earth_center[0]-3, earth_center[1], 'Eclipse Region', color = 'black', ha='center', fontweight='bold') 
+
+
+sat_plot, = ax1.plot([], [], 'o', color='black', markersize=6, zorder=10)
+
+# --- Combined Temperature + Power plot ---
+ax2.set_xlim(0, period)
+ax2.set_ylim(vmin, vmax)
+ax2.set_title("Satellite Surface Temperature & Power Output vs Time")
+ax2.set_xlabel("Time [s]")
+ax2.set_ylabel("Temperature [K]", color='crimson')
+ax2.grid(True)
+line_temp, = ax2.plot([], [], color='crimson', lw=2)
+point_temp, = ax2.plot([], [], 'o', color='black')
+
+ax2b = ax2.twinx()
+ax2b.set_ylim(0, 1.1*np.max(P))
+ax2b.set_ylabel("Power [W]", color='goldenrod')
+line_power, = ax2b.plot([], [], color='goldenrod', lw=2)
+point_power, = ax2b.plot([], [], 'o', color='black')
+
+def update(frame):
+    pos = np.array([x_sat[frame], y_sat[frame]])
+    sat_plot.set_data(pos[0], pos[1])
+    temp_now = T[frame]
+    sat_plot.set_color(cmap(norm(temp_now)))
+    line_temp.set_data(t[:frame+1], T[:frame+1])
+    point_temp.set_data(t[frame], T[frame])
+    line_power.set_data(t[:frame+1], P[:frame+1])
+    point_power.set_data(t[frame], P[frame])
+    return sat_plot, line_temp, point_temp, line_power, point_power
+
+anim = FuncAnimation(fig, update, frames=frames, interval=1000/fps, blit=True)
+plt.tight_layout()
+plt.show()
