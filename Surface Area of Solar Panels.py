@@ -4,20 +4,20 @@ from matplotlib.ticker import MultipleLocator
 
 # Surface area of the solar panels absorbing sunlight as a percentage of the total
 # Parameters 
-A_max = 100   # surface area at 0 degrees as a percentage
-A_min = 0    # surface area at 90 degrees as a percentage
-occlusion_start = 135.05  # angle at which satellite first cannot be seen
-occlusion_end   = 224.95  # angle at which satellite re-emerges
+A_max = 100   # percentage surface area at 0 degrees
+A_min = 0    # percentage surface area at 90 degrees
+
+occlusion_start = 162.03  # angle at which satellite first cannot be seen
+occlusion_end   = 197.97  # angle at which satellite re-emerges
 
 # Angle array
 theta_deg = np.linspace(0, 360, 2000)
 theta_rad = np.deg2rad(theta_deg)
 
-# Projected-area function: A(theta) = (A_max - A_min)*|cos(theta)| + A_min
-# Use shifted angle so min area is at t=0 (theta=0)
-A = (A_max - A_min) * np.abs(np.sin(theta_rad)) + A_min
+# Change in surface area with angle 
+A = (A_max - A_min) * np.abs(np.cos(theta_rad)) + A_min
 
-# Apply occlusion: set area to zero inside the occlusion interval
+# Set area to zero when the satellite is behind Earth's shadow
 in_occlusion = (theta_deg >= occlusion_start) & (theta_deg <= occlusion_end)
 A[in_occlusion] = 0.0
 
@@ -57,3 +57,4 @@ plt.grid(alpha=0.3)
 plt.show()
 
 print(f"The satellite is in the Earths shadow between t = {occlusion_start_time:.2f} hours and t = {occlusion_end_time:.2f} hours.")
+
