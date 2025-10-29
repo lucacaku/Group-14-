@@ -3,6 +3,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
 
+#hello world!
+
 # initialise constants
 sigma = 5.67e-8  # Stefan-Boltzmann constant W/m^2K^4
 solar_constant = 1361  # W/m^2
