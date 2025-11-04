@@ -42,21 +42,22 @@ time_year = np.linspace(0, year_seconds, 5000)
 
 
 def eclipse_mask(t):
-    # Sun-Earth GEOM angle variation due to tilt
-    sun_declination = 23.44 * np.pi/180 * np.sin(2*np.pi * t / year_seconds)
+    # Convert seconds → days of year
+    day = (t / 86400) % 365.25
 
-    # GEO latitude = 0, so shadow only when declination near 0 (equinox)
-    shadow_condition = np.abs(sun_declination) < (earth_radius / orbital_radius)
+    # Eclipse windows (approx)
+    season1 = (day > 80) & (day < 122)   # March to early May
+    season2 = (day > 260) & (day < 302)  # Sept to early Nov
 
-    # Compute local eclipse geometry each orbit
-    eclipse_half_angle = np.arccos(earth_radius / orbital_radius / np.cos(sun_declination))
-    eclipse_duration = 2 * eclipse_half_angle / (2*np.pi) * orbital_period 
+    in_season = season1 | season2
 
-    # Check phase within each orbit
-    orbit_phase = t % orbital_period 
-    eclipse_phase = orbit_phase < eclipse_duration
+    # Orbital phase eclipse (about 70 minutes per day in season)
+    eclipse_duration = 0.0708 * 86400  # ~70 min
+    orbit_phase = t % orbital_period
 
-    return shadow_condition & eclipse_phase
+    in_eclipse = orbit_phase < eclipse_duration
+
+    return in_season & in_eclipse
 
 
 sunlight_year = np.where(eclipse_mask(time_year), 0, 1)
@@ -122,11 +123,15 @@ for name, props in coatings.items():
 #Plot full year
 plt.figure(figsize=(12, 6))
 for name, data in results.items():
-    plt.plot(time_year / 86400, data["T"], label=name)
+    plt.plot(time_year / year_seconds * 12, data["T"], label=name)
 
 plt.axhline(threshold_low, linestyle='--', label='20°C Limit (293K)')
 plt.axhline(threshold_high, linestyle='--', label='50°C Limit (323K)')
-plt.xlabel("Time (days)")
+plt.xlabel("Month of Year")
+plt.xticks(
+    ticks=np.arange(0,13,1)
+    labels=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan']
+)    
 plt.ylabel("Temperature (K)")
 plt.title("Full-Year Temperature Profile for Each Coating")
 plt.grid(True)
