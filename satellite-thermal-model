@@ -14,9 +14,12 @@ threshold_low = 293  # K (20 C)
 threshold_high = 323  # K (50 C)
 
 # satellite geometry
-height = 2.0
-width = 3.7
-depth = 1.7
+height = float(input("Enter the satellite height (m): "))  # m
+width = float(input("Enter the satellite width (m): "))  # m
+depth = float(input("Enter the satellite depth (m): "))  # m
+
+#calculate real max presented height
+real_height = depth*np.sin(np.deg2rad(23.44))+height*np.sin(np.deg2rad(66.56))
 
 # model parameters
 mass = 3000  # kg
@@ -64,7 +67,7 @@ sunlight_year = np.where(eclipse_mask(time_year), 0, 1)
 
 # orbital angle model only computed on one orbit
 theta_rad = np.pi/4 * np.sin(2 * np.pi * time_orbit / orbital_period)
-A_presented_orbit = height * (np.abs(width * np.cos(theta_rad)) + np.abs(depth * np.sin(theta_rad)))
+A_presented_orbit = real_height * (np.abs(width * np.cos(theta_rad)) + np.abs(depth * np.sin(theta_rad)))
 
 # tile presented area over full year
 reps = int(np.ceil(len(time_year) / len(A_presented_orbit)))
