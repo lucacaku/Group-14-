@@ -2,6 +2,9 @@ import scipy as sp
 import numpy as np
 import matplotlib.pyplot as plt
 import pandas as pd
+from scipy.integrate import solve_ivp
+from scipy.interpolate import interp1d
+
 
 # initialise constants
 sigma = 5.67e-8  # Stefan-Boltzmann constant W/m^2K^4
@@ -42,22 +45,21 @@ time_year = np.linspace(0, year_seconds, 5000)
 
 
 def eclipse_mask(t):
-    # Convert seconds → days of year
-    day = (t / 86400) % 365.25
+    # Sun-Earth GEOM angle variation due to tilt
+    sun_declination = 23.44 * np.pi/180 * np.sin(2*np.pi * t / year_seconds)
 
-    # Eclipse windows (approx)
-    season1 = (day > 80) & (day < 122)   # March to early May
-    season2 = (day > 260) & (day < 302)  # Sept to early Nov
+    # GEO latitude = 0, so shadow only when declination near 0 (equinox)
+    shadow_condition = np.abs(sun_declination) < (earth_radius / orbital_radius)
 
-    in_season = season1 | season2
+    # Compute local eclipse geometry each orbit
+    eclipse_half_angle = np.arccos(earth_radius / orbital_radius / np.cos(sun_declination))
+    eclipse_duration = 2 * eclipse_half_angle / (2*np.pi) * orbital_period 
 
-    # Orbital phase eclipse (about 70 minutes per day in season)
-    eclipse_duration = 0.0708 * 86400  # ~70 min
-    orbit_phase = t % orbital_period
+    # Check phase within each orbit
+    orbit_phase = t % orbital_period 
+    eclipse_phase = orbit_phase < eclipse_duration
 
-    in_eclipse = orbit_phase < eclipse_duration
-
-    return in_season & in_eclipse
+    return shadow_condition & eclipse_phase
 
 
 sunlight_year = np.where(eclipse_mask(time_year), 0, 1)
@@ -76,82 +78,90 @@ A_earth_orbit = np.pi * (earth_radius**2) * (1 - np.cos(half_angle_earth))
 
 A_earth = A_earth_orbit * sunlight_year  # zero during eclipse
 
-def heat_balance(alpha, epsilon, time_array):
-    dt = time_array[1] - time_array[0]
-    T = np.zeros_like(time_array)
-    T[0] = 401  # Initial temperature
 
-    for i in range(1, len(time_array)):
-        Q_solar = alpha * solar_constant * sunlight_year[i] * A_presented[i]
-        Q_albedo = solar_constant * albedo * (A_earth[i] / (4 * np.pi * orbital_radius**2))
-        Q_ir = epsilon * sigma * T[i-1]**4 * A_presented[i]
 
-        net_Q = Q_solar + Q_albedo - Q_ir
-        T[i] = T[i-1] + net_Q * dt / (mass * c)
+A_pres_interp = interp1d(time_year, A_presented, kind='linear', fill_value='extrapolate')
+sunlight_interp = interp1d(time_year, sunlight_year, kind='nearest', fill_value='extrapolate')
+A_earth_interp = interp1d(time_year, A_earth, kind='linear', fill_value='extrapolate')
 
-    return T
+def thermal_rhs(t, T, alpha, epsilon, heater_state):
+    T = float(T)
+    # instantaneous presented area and sunlight flag
+    A_pres = float(A_pres_interp(t))
+    is_sunlit = float(sunlight_interp(t))  # 0 or 1 (nearest interp)
+    A_earth_local = float(A_earth_interp(t))
+
+    # inputs (W)
+    Q_solar = alpha * solar_constant * is_sunlit * A_pres         # direct solar
+    Q_albedo = solar_constant * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2))
+    Q_ir_loss = epsilon * sigma * (T**4) * A_pres                # radiative loss from body
+
+    heater_power = 28000  # W (adjustable)
+    if T < threshold_low:
+        heater_state = 1
+    elif T > threshold_high:
+        heater_state = 0
+
+    Q_heater = heater_power * heater_state
+
+    Q_net = Q_solar + Q_albedo + Q_heater - Q_ir_loss
+    dTdt = Q_net / (mass * c)
+
+    return dTdt, heater_state, Q_heater
+
+
+def heat_balance_RK4_with_heater(alpha, epsilon, time_array, T_init=401):
+    n = len(time_array)
+    T = np.zeros(n)
+    heater_state = np.zeros(n)
+    heater_energy = np.zeros(n)
+
+    T[0] = T_init
+    heater_state[0] = 0  # start OFF
+
+    for i in range(n - 1):
+        t = time_array[i]
+        h = time_array[i + 1] - time_array[i]
+
+        # Compute the four RK4 slopes
+        k1, h1_state, Qh1 = thermal_rhs(t, T[i], alpha, epsilon, heater_state[i])
+        k2, h2_state, Qh2 = thermal_rhs(t + h/2, T[i] + h/2*k1, alpha, epsilon, h1_state)
+        k3, h3_state, Qh3 = thermal_rhs(t + h/2, T[i] + h/2*k2, alpha, epsilon, h2_state)
+        k4, h4_state, Qh4 = thermal_rhs(t + h, T[i] + h*k3, alpha, epsilon, h3_state)
+
+        # Weighted slope
+        slope = (k1 + 2*k2 + 2*k3 + k4) / 6.0
+        T[i+1] = T[i] + h * slope
+
+        # Use latest heater state (from final RK4 call)
+        heater_state[i+1] = h4_state
+
+        # Accumulate heater energy (W * s = J)
+        heater_energy[i+1] = heater_energy[i] + Qh4 * h
+
+    total_energy_kWh = heater_energy[-1] / 3.6e6
+    return T, heater_state, total_energy_kWh
 
 
 results = {}
 
-# Run simulation for each coating
 for name, props in coatings.items():
     alpha = props['alpha']
     epsilon = props['epsilon']
 
-    # Solve full-year temperatures
-    T_year = heat_balance(alpha, epsilon, time_year)
+    T_sol, heater_state, energy_used = heat_balance_RK4_with_heater(alpha, epsilon, time_year)
+    results[name] = {"T": T_sol, "heater": heater_state, "energy_kWh": energy_used}
 
-    # Store full profile
-    results[name] = {"T": T_year}
+    print(f"{name}: Total heater energy = {energy_used:.2f} kWh/year")
 
-    # Find worst thermal swing
-    day_duration = 86400
-    n_points_day = int(day_duration / (time_year[1] - time_year[0])) 
-    max_swing = 0 
-    worst_start_idx = 0
-
-    for i in range(len(time_year) - n_points_day):
-        window = T_year[i:i+n_points_day]
-        swing = np.max(window) - np.min(window) 
-        if swing > max_swing:
-            max_swing = swing
-            worst_start_idx = i 
-
-    results[name]["worst_start"] = worst_start_idx
-
-#Plot full year
-plt.figure(figsize=(12, 6))
 for name, data in results.items():
-    plt.plot(time_year / year_seconds * 12, data["T"], label=name)
+    plt.figure(figsize=(10,5))
+    plt.plot(time_year/86400, data["T"], label=f"{name} Temperature")
+    plt.fill_between(time_year/86400, threshold_low, threshold_high, color='orange', alpha=0.2, label="Heater band")
+    plt.xlabel("Time (days)")
+    plt.ylabel("Temperature (K)")
+    plt.title(f"Temperature Evolution with Heater - {name}")
+    plt.legend()
+    plt.grid(True)
+    plt.show()
 
-plt.axhline(threshold_low, linestyle='--', label='20°C Limit (293K)')
-plt.axhline(threshold_high, linestyle='--', label='50°C Limit (323K)')
-plt.xlabel("Month of Year")
-plt.xticks(
-    ticks=np.arange(0,13,1)
-    labels=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec', 'Jan']
-)    
-plt.ylabel("Temperature (K)")
-plt.title("Full-Year Temperature Profile for Each Coating")
-plt.grid(True)
-plt.legend()
-plt.show()
-
-# Plot worst eclipse day 
-plt.figure(figsize=(12, 6))
-for name, data in results.items():
-    idx = data["worst_start"]
-    hours = (time_year[idx:idx+n_points_day] - time_year[idx]) / 3600
-    T_day = data["T"][idx:idx+n_points_day]
-    plt.plot(hours, T_day, label=name)
-
-plt.axhline(threshold_low, linestyle='--', label='20°C Limit (293K)')
-plt.axhline(threshold_high, linestyle='--', label='50°C Limit (323K)')
-plt.xlabel("Time of Day (hours)")
-plt.ylabel("Temperature (K)")
-plt.title("Worst-Case Daily Temperature Variation for Each Coating")
-plt.grid(True)
-plt.legend()
-plt.xlim(0,24)
-plt.show()
