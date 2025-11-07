@@ -85,3 +85,23 @@ roots_time = roots / 15
 roots_time_str = " ".join(f"{r:.2f}" for r in roots_time)
 
 print(f"The solar panel surface area will be zero at the times: {roots_time_str}")
+
+# power output when surface area is less than 10% is negligible
+
+# Find continuous intervals where the surface area is less than 10%
+mask = f(theta_deg) < 10
+indices = np.where(mask)[0]
+intervals = []
+if len(indices) > 0:
+    start = indices[0]
+    for i in range(1, len(indices)):
+        if indices[i] != indices[i-1] + 1:
+            end = indices[i-1]
+            intervals.append((time[start], time[end]))
+            start = indices[i]
+    intervals.append((time[start], time[indices[-1]]))
+
+print("Intervals when surface area < 10%:")
+for (t1, t2) in intervals:
+    print(f"From {t1:.2f} h to {t2:.2f} h")
+
