@@ -50,7 +50,7 @@ def visible_area_pct(theta_deg):
     return (A_max - A_min) * np.abs(np.cos(theta_rad)) + A_min
 
 # Thresholds / policy parameters (you can tweak these)
-precharge_window_days = float(input("Precharge window before eclipse (days) [default 1.0]: ") or 1.0)
+precharge_window_days = float(input("Precharge window before eclipse (days) [default 5.0]: ") or 1.0)
 angle_visibility_threshold_pct = float(input("Panel visible area threshold (%) below which power = 0 [default 10]: ") or 10.0)
 dip_width = 5  # days used for gaussian eclipse spread (as in your original code)
 
