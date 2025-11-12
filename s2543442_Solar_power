@@ -1,0 +1,269 @@
+# -*- coding: utf-8 -*-
+
+import numpy as np
+import matplotlib.pyplot as plt
+from skyfield.api import load
+from skyfield import eclipselib
+from datetime import datetime, timedelta
+
+# ---- User input for start date ----
+start_date_str = input("Enter simulation start date (YYYY-MM-DD): ")
+start_date = datetime.strptime(start_date_str, "%Y-%m-%d")
+years = int(input("Please enter the number of years: "))
+end_date = start_date + timedelta(days=365 * years)
+
+# ---- Simulation parameters ----
+days = 365 * years
+hours_per_day = 24
+time = np.linspace(0, days * hours_per_day, days * 1000)  # continuous time in hours
+dt = (time[1] - time[0])  # hours per sample
+start_hour = 12
+
+# ---- Satellite and power system parameters ----
+P_max = 50000            # max solar panel power (W)
+load_power = 700         # constant satellite load (W)
+battery_capacity = 10000  # battery capacity (Wh)
+battery_charge = np.zeros_like(time)
+
+# ---- User-defined optical properties ----
+absorptivity = float(input("Enter solar panel absorptivity (0–1) [default 0.9]: ") or 0.9)
+emissivity = float(input("Enter solar panel emissivity (0–1) [default 0.85]: ") or 0.85)
+
+# Efficiency modifier from optical properties
+efficiency_factor = absorptivity / (emissivity + 1e-6)
+efficiency_factor = np.clip(efficiency_factor, 0.5, 1.2)
+
+# ---- Solar power generation base model ----
+daily_variation = np.maximum(0, np.cos(2 * np.pi * ((time + start_hour) % 24) / 24))
+seasonal_factor = 0.8 + 0.2 * np.sin(2 * np.pi * time / (24 * 365))
+
+# ---- Panel geometry model (from your second script) ----
+A_max = 100.0   # "100" corresponds to 100% visible area
+A_min = 0.0
+
+def visible_area_pct(theta_deg):
+    """
+    Returns visible surface area percentage (0..A_max) for panel orientation theta_deg.
+    theta_deg is degrees representing orbital angle (or time-of-day mapped angle).
+    """
+    theta_rad = np.deg2rad(theta_deg)
+    return (A_max - A_min) * np.abs(np.cos(theta_rad)) + A_min
+
+# Thresholds / policy parameters (you can tweak these)
+precharge_window_days = float(input("Precharge window before eclipse (days) [default 1.0]: ") or 1.0)
+angle_visibility_threshold_pct = float(input("Panel visible area threshold (%) below which power = 0 [default 10]: ") or 10.0)
+dip_width = 5  # days used for gaussian eclipse spread (as in your original code)
+
+# ---- Fetch real lunar eclipses using Skyfield ----
+print(f"\nFetching real lunar eclipses from {start_date.year} to {end_date.year}...\n")
+
+eph = load('de421.bsp')
+ts = load.timescale()
+t0 = ts.utc(start_date.year, start_date.month, start_date.day)
+t1 = ts.utc(end_date.year, end_date.month, end_date.day)
+
+# Compute all lunar eclipses
+t, y, details = eclipselib.lunar_eclipses(t0, t1, eph)
+
+# Interpret eclipse types and extract days
+eclipse_days = []
+eclipse_types = []
+
+penumbral_mag = details.get('penumbral_magnitude')
+umbral_mag = details.get('umbral_magnitude')
+
+for idx, ti in enumerate(t):
+    utc_time = ti.utc_datetime()
+    day_since_start = (utc_time.replace(tzinfo=None) - start_date).days
+    eclipse_days.append(day_since_start)
+
+    # Classify eclipse type
+    umag = float(umbral_mag[idx]) if umbral_mag is not None else 0.0
+    pmag = float(penumbral_mag[idx]) if penumbral_mag is not None else 0.0
+
+    if umag >= 1.0:
+        etype = 'total'
+    elif umag > 0.0:
+        etype = 'partial'
+    elif pmag > 0.0:
+        etype = 'penumbral'
+    else:
+        etype = 'unknown'
+
+    eclipse_types.append(etype)
+    print(f"→ {utc_time.strftime('%Y-%m-%d %H:%M UTC')} : {etype} (Day {day_since_start})")
+
+# ---- Eclipse power attenuation model ----
+day_of_sim = (time / 24)
+depth = {"penumbral": 0.05, "partial": 0.25, "total": 0.45}
+eclipse_factor = np.ones_like(day_of_sim)
+
+for eq_day, eclipse_type in zip(eclipse_days, eclipse_types):
+    attenuation = depth.get(eclipse_type, 0.1)
+    eclipse_factor *= 1 - attenuation * np.exp(-0.5 * ((day_of_sim - eq_day) / dip_width) ** 2)
+
+# ---- Panel-angle dependent visible area and thresholding ----
+# Map time -> orbital angle (deg). 360 degrees per 24 hours => 15 deg/hour
+theta_deg_time = (time % 24) * 15.0
+area_pct_time = visible_area_pct(theta_deg_time)  # 0..A_max
+
+# Enforce threshold: if visible area < angle_visibility_threshold_pct -> zero generation
+area_fraction = area_pct_time / A_max
+area_fraction[area_pct_time < angle_visibility_threshold_pct] = 0.0
+
+# ---- Combine all effects to compute P_solar ----
+P_solar = P_max * efficiency_factor * daily_variation * seasonal_factor * eclipse_factor * area_fraction
+
+# ---- Fill any NaNs by interpolation (as you had) ----
+if np.isnan(P_solar).any():
+    nan_idx = np.isnan(P_solar)
+    P_solar[nan_idx] = np.interp(time[nan_idx], time[~nan_idx], P_solar[~nan_idx])
+
+# ---- Battery initialization ----
+initial_solar_fraction = (P_solar[0] - np.min(P_solar)) / (np.max(P_solar) - np.min(P_solar) + 1e-6)
+battery_charge[0] = (0.4 + 0.5 * initial_solar_fraction) * battery_capacity
+
+# ---- Precompute eclipse-dependent reserve profile ----
+battery_reserve_profile = np.zeros_like(time)
+
+for eq_day, eclipse_type in zip(eclipse_days, eclipse_types):
+    # Determine max reserve based on eclipse type
+    if eclipse_type == 'penumbral':
+        max_reserve = 0.1 * battery_capacity
+    elif eclipse_type == 'partial':
+        max_reserve = 0.2 * battery_capacity
+    elif eclipse_type == 'total':
+        max_reserve = 0.3 * battery_capacity
+    else:
+        max_reserve = 0.0
+
+    # Spread reserve around eclipse center
+    reserve_profile = max_reserve * np.exp(-0.5 * ((day_of_sim - eq_day) / dip_width) ** 2)
+    battery_reserve_profile = np.maximum(battery_reserve_profile, reserve_profile)
+
+# ---- Precompute charging-allowed windows ----
+charging_allowed = np.zeros_like(time, dtype=bool)
+for eq_day in eclipse_days:
+    # Allow charging from (eq_day - precharge_window_days) up to eq_day + dip_width (so we can top up during approach)
+    start_allowed = eq_day - precharge_window_days
+    end_allowed = eq_day + dip_width
+    charging_allowed |= (day_of_sim >= start_allowed) & (day_of_sim <= end_allowed)
+
+# ---- Battery charge integration with charging policy ----
+for i in range(1, len(time)):
+    net_power = P_solar[i] - load_power
+
+    if net_power > 0:
+        # Surplus exists: only add to battery if charging is allowed
+        if charging_allowed[i]:
+            delta_energy = net_power * dt
+        else:
+            # surplus is wasted (no charging allowed)
+            delta_energy = 0.0
+    else:
+        # deficit: battery supplies the deficit (discharge)
+        delta_energy = net_power * dt
+
+    proposed_charge = battery_charge[i - 1] + delta_energy
+    # don't allow battery to fall below reserve requirement
+    battery_charge[i] = np.clip(proposed_charge, battery_reserve_profile[i], battery_capacity)
+
+# ---- Linear regression (battery trend) ----
+from numpy.polynomial.polynomial import polyfit
+
+t_days = time / 24
+# Fit a first-order polynomial (y = a + b*x)
+b0, b1 = polyfit(t_days, battery_charge, 1)
+battery_fit = b0 + b1 * t_days
+
+print(f"\nLinear regression of battery charge: slope = {b1:.4f} Wh/day")
+
+# ---- Daily energy calculation for comparison ----
+# Convert to day index integers 0..days-1
+day_indices = np.floor(day_of_sim).astype(int)
+daily_energy_wh = np.zeros(days)  # Wh per day
+
+for d in range(days):
+    idx = np.where(day_indices == d)[0]
+    if idx.size > 0:
+        # P_solar is in W, dt is hours -> sum(W * hours) = Wh
+        daily_energy_wh[d] = np.sum(P_solar[idx] * dt)
+
+# Choose a "normal" day: first day that is far (> dip_width) from any eclipse center
+normal_day = None
+for d in range(days):
+    if all(abs(d - ed) > dip_width for ed in eclipse_days):
+        normal_day = d
+        break
+if normal_day is None:
+    normal_day = 0
+
+print(f"\nRepresentative normal day chosen: Day {normal_day}")
+
+# Print comparison for each eclipse day
+print("\n--- Daily energy comparison (Wh) ---")
+normal_energy = daily_energy_wh[normal_day]
+print(f"Normal day (Day {normal_day}): {normal_energy:.2f} Wh generated")
+
+for eq_day, etype in zip(eclipse_days, eclipse_types):
+    if 0 <= eq_day < days:
+        eclipse_energy = daily_energy_wh[int(eq_day)]
+        pct_drop = 100.0 * (1.0 - (eclipse_energy / (normal_energy + 1e-9)))
+        print(f"Day {int(eq_day):3d} ({etype:9s}): {eclipse_energy:10.2f} Wh   drop vs normal = {pct_drop:6.2f}%")
+    else:
+        print(f"Day {int(eq_day):3d} ({etype:9s}): out of simulation range")
+
+# ---- Plot results ----
+fig, ax1 = plt.subplots(figsize=(13, 6))
+
+ax1.plot(t_days, P_solar, linewidth=1.2, label='Solar Panel Power (W)')
+ax1.axhline(load_power, color='red', linestyle='--', label='Satellite Load (W)')
+ax1.set_xlabel('Time (days)')
+ax1.set_xlim(0, days)
+ax1.set_ylabel('Power (W)')
+ax1.set_ylim(0, 1.5 * P_max)
+ax1.grid(True, linestyle='--', alpha=0.5)
+
+# ---- Annotate lunar eclipses ----
+for eq_day, eclipse_type in zip(eclipse_days, eclipse_types):
+    ax1.axvline(eq_day, color='gray', linestyle='--', alpha=0.6)
+    ax1.annotate(f'{eclipse_type.capitalize()} Eclipse\n(Day {eq_day})',
+                 xy=(eq_day, P_max * 0.85),
+                 xytext=(eq_day + 15, P_max * 0.95),
+                 arrowprops=dict(arrowstyle='->', color='gray'),
+                 fontsize=8, color='black',
+                 bbox=dict(boxstyle="round,pad=0.3", fc="white", ec="gray", alpha=0.7))
+
+# ---- Battery subplot ----
+ax2 = ax1.twinx()
+ax2.plot(t_days, battery_charge, color='blue', linewidth=1.5, label='Battery Charge (Wh)')
+ax2.plot(t_days, battery_fit, color='limegreen', linestyle='--', linewidth=1.5, label='Linear Regression (Battery)')
+ax2.set_ylabel('Battery Energy (Wh)')
+ax2.set_ylim(0, battery_capacity * 1.1)
+
+# ---- Root finding: when solar power equals load ----
+P_net = P_solar - load_power
+sign_changes = np.where(np.diff(np.sign(P_net)))[0]
+
+roots = []
+for idx in sign_changes:
+    t0, t1 = t_days[idx], t_days[idx + 1]
+    y0, y1 = P_net[idx], P_net[idx + 1]
+    root = t0 - y0 * (t1 - t0) / (y1 - y0)
+    roots.append(root)
+
+ax1.scatter(roots, [load_power]*len(roots), marker='x', s=30, label='Psolar = Pload')
+
+print("\n--- Power equals load at (approx) days ---")
+for r in roots[:10]:
+    print(f"Day {r:.2f}")
+
+# ---- Add titles and legends ----
+plt.title(f'Satellite Power & Battery over {years} Years\n'
+          f'({start_date.year}–{end_date.year}) with Real Lunar Eclipses\n'
+          f'Absorptivity={absorptivity}, Emissivity={emissivity}, Start={start_hour}:00\n'
+          f'Charging window = {precharge_window_days} day(s) before eclipse, visibility threshold = {angle_visibility_threshold_pct}%')
+ax1.legend(loc='upper left')
+ax2.legend(loc='upper right')
+plt.tight_layout()
+plt.show()
