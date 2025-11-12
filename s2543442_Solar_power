@@ -22,7 +22,7 @@ start_hour = 12
 # ---- Satellite and power system parameters ----
 P_max = 50000            # max solar panel power (W)
 load_power = 700         # constant satellite load (W)
-battery_capacity = 10000  # battery capacity (Wh)
+battery_capacity = 90000  # battery capacity (Wh)
 battery_charge = np.zeros_like(time)
 
 # ---- User-defined optical properties ----
