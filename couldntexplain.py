@@ -1,0 +1,334 @@
+import scipy as sp
+import numpy as np
+import matplotlib.pyplot as plt
+import pandas as pd
+from scipy.interpolate import interp1d
+
+
+# initialise constants
+sigma = 5.67e-8  # Stefan-Boltzmann constant W/m^2K^4
+solar_constant = 1361  # W/m^2
+albedo = 0.3  # average albedo of Earth
+emissivity = 0.612  # avg emissivity
+Gravitational_constant = 6.67430e-11  # m^3 kg^-1 s^-2
+mass_of_earth = 5.972e24  # kg
+threshold_low = 293  
+threshold_high = 313 
+
+# satellite geometry
+height = 2.7
+width = 3.6
+depth = 5.7
+
+# model parameters
+mass = 2630  # kg
+c = 900  # J/kgK
+
+# coating properties
+coatings = {
+    'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93},
+    'Ta2O5, SiN, SiO2 Film': {'alpha': 0.110, 'epsilon': 0.750},
+    'Hughson White Paint A276': {'alpha': 0.26, 'epsilon': 0.88},
+    'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04}
+}
+
+altitude = 35786e3
+earth_radius = 6371e3
+year_seconds = 365.25 * 24 * 3600
+
+orbital_radius = earth_radius + altitude
+orbital_period = 2 * np.pi * np.sqrt(orbital_radius**3 / (Gravitational_constant * mass_of_earth))
+
+# Unified time base: choose a fixed timestep `dt` and use it everywhere.
+# This keeps sampling consistent between the single-orbit model and the
+# multi-day simulation.
+dt = 10 * 60  #time step
+
+day_start = 110
+sim_days = 30
+simulation_start = day_start * 24 * 3600
+simulation_end = (day_start + sim_days) * 24 * 3600
+
+# Time arrays sampled at the same timestep
+time_year = np.arange(simulation_start, simulation_end + dt, dt)
+time_orbit = np.arange(0, orbital_period + dt, dt)
+
+# Two distinct time ranges:
+# - time_sweep: short simulation used for the heater power sweep (3 days)
+# - time_long: long simulation used for final temperature evolution (1 year)
+time_sweep_start = simulation_start
+time_sweep_days = 3
+time_sweep = np.arange(time_sweep_start, time_sweep_start + time_sweep_days*24*3600 + dt, dt)
+
+time_long_start = simulation_start
+time_long = np.arange(time_long_start, time_long_start + year_seconds/2 + dt, dt)
+
+# Precompute one-orbit presented area (sampled with the same dt)
+theta_rad = np.pi/4 * np.sin(2 * np.pi * time_orbit / orbital_period)
+A_presented_orbit = height * (np.abs(width * np.cos(theta_rad)) + np.abs(depth * np.sin(theta_rad)))
+
+
+def set_interps_for(time_array):
+    """Create global interpolators (A_pres_interp, sunlight_interp, A_earth_interp)
+    for a given time array. This allows using the same thermal_rhs implementation
+    for both the short sweep and the long, 1-year run.
+    """
+    global A_pres_interp, sunlight_interp, A_earth_interp
+
+    sunlight = np.where(eclipse_mask(time_array), 0, 1)
+
+    reps = int(np.ceil(len(time_array) / len(A_presented_orbit)))
+    A_presented = np.tile(A_presented_orbit, reps)[:len(time_array)]
+
+    half_angle_earth = np.arcsin(earth_radius / orbital_radius)
+    A_earth_orbit = np.pi * (earth_radius**2) * (1 - np.cos(half_angle_earth))
+    A_earth = A_earth_orbit * sunlight
+
+    A_pres_interp = interp1d(time_array, A_presented, kind='linear', fill_value='extrapolate')
+    sunlight_interp = interp1d(time_array, sunlight, kind='nearest', fill_value='extrapolate')
+    A_earth_interp = interp1d(time_array, A_earth, kind='nearest', fill_value='extrapolate')
+
+
+def eclipse_mask(t):
+    # Convert seconds → days of year
+    day = (t / 86400) % 365.25
+
+    # Eclipse windows (approx)
+    season1 = (day > 80) & (day < 122)   # March to early May
+    season2 = (day > 260) & (day < 302)  # Sept to early Nov
+
+    in_season = season1 | season2
+
+    # Orbital phase eclipse (about 70 minutes per day in season)
+    eclipse_duration = 0.0708 * 86400  # ~70 min
+    orbit_phase = t % orbital_period
+
+    in_eclipse = orbit_phase < eclipse_duration
+
+    return in_season & in_eclipse
+
+
+
+# Initialize interpolators for the short sweep (3 days)
+set_interps_for(time_sweep)
+
+
+def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
+    T = float(T)
+    # instantaneous presented area and sunlight flag
+    A_pres = float(A_pres_interp(t))
+    is_sunlit = float(sunlight_interp(t))  # 0 or 1 (nearest interp)
+    A_earth_local = float(A_earth_interp(t))
+
+    # inputs (W)
+    Q_solar = alpha * solar_constant * is_sunlit * A_pres         # direct solar
+    Q_albedo = solar_constant * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2))
+    Q_ir_loss = epsilon * sigma * (T**4) * A_pres                # radiative loss from body
+
+    if T < threshold_low:
+        heater_state = 1
+    elif T > threshold_high:
+        heater_state = 0
+
+    Q_heater = heater_power * heater_state
+
+    Q_net = Q_solar + Q_albedo + Q_heater - Q_ir_loss
+    dTdt = Q_net / (mass * c)
+
+    return dTdt, heater_state, Q_heater
+
+
+def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_init=300.0):
+    n = len(time_array)
+    T = np.zeros(n)
+    heater_state = np.zeros(n)
+    heater_energy = np.zeros(n)
+
+    T[0] = T_init
+    heater_state[0] = 0  # start OFF
+
+    for i in range(n - 1):
+        t = time_array[i]
+        h = time_array[i + 1] - time_array[i]
+
+        # Compute the four RK4 slopes
+        k1, h1_state, Qh1 = thermal_rhs(t, T[i], alpha, epsilon, heater_state[i],heater_power)
+        k2, h2_state, Qh2 = thermal_rhs(t + h/2, T[i] + h/2*k1, alpha, epsilon, h1_state, heater_power)
+        k3, h3_state, Qh3 = thermal_rhs(t + h/2, T[i] + h/2*k2, alpha, epsilon, h2_state, heater_power)
+        k4, h4_state, Qh4 = thermal_rhs(t + h, T[i] + h*k3, alpha, epsilon, h3_state, heater_power)
+
+        # Weighted slope
+        slope = (k1 + 2*k2 + 2*k3 + k4) / 6.0
+        T[i+1] = T[i] + h * slope
+
+        # Use latest heater state (from final RK4 call)
+        heater_state[i+1] = h4_state
+
+        # Accumulate heater energy (W * s = J)
+        heater_energy[i+1] = heater_energy[i] + Qh4 * h
+
+    total_energy_kWh = heater_energy[-1] / 3.6e6
+    return T, heater_state, total_energy_kWh
+
+results_temp = {}
+
+
+heater_powers = np.arange(0000, 15001, 500)  # test 2, 4, 6, 8, 10 kW
+results = {}
+
+for name, props in coatings.items():
+    alpha = props['alpha']
+    epsilon = props['epsilon']
+
+    # initialize container for this coating's results
+    results[name] = {}
+    energy_vs_power = []  # store total heater energy for each power level
+
+    # print(f"\n=== {name} ===")
+    for power in heater_powers:
+        def thermal_rhs_power(t, T, alpha=alpha, epsilon=epsilon, heater_state=0):
+            T = float(T)
+            A_pres = float(A_pres_interp(t))
+            is_sunlit = float(sunlight_interp(t))
+            A_earth_local = float(A_earth_interp(t))
+
+            # energy balance
+            Q_solar = alpha * solar_constant * is_sunlit * A_pres
+            Q_albedo = solar_constant * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2))
+            Q_ir_loss = epsilon * sigma * (T**4) * A_pres
+
+            if T < threshold_low:
+                heater_state = 1
+            elif T > threshold_high:
+                heater_state = 0
+
+            Q_heater = power * heater_state
+            Q_net = Q_solar + Q_albedo + Q_heater - Q_ir_loss
+
+            dTdt = Q_net / (mass * c)
+            return dTdt, heater_state, Q_heater
+
+        # integrate temperature over the short sweep time array
+        n = len(time_sweep)
+        T = np.zeros(n)
+        heater_state = np.zeros(n)
+        heater_energy = np.zeros(n)
+
+        T[0] = 300.0
+        heater_state[0] = 0
+
+        for i in range(n - 1):
+            t = time_sweep[i]
+            h = time_sweep[i + 1] - time_sweep[i]
+
+            # RK4 integration
+            k1, h1_state, Qh1 = thermal_rhs_power(t, T[i])
+            k2, h2_state, Qh2 = thermal_rhs_power(t + h/2, T[i] + h/2*k1)
+            k3, h3_state, Qh3 = thermal_rhs_power(t + h/2, T[i] + h/2*k2)
+            k4, h4_state, Qh4 = thermal_rhs_power(t + h, T[i] + h*k3)
+
+            slope = (k1 + 2*k2 + 2*k3 + k4) / 6.0
+            T[i+1] = T[i] + h * slope
+            heater_state[i+1] = h4_state
+            heater_energy[i+1] = heater_energy[i] + Qh4 * h
+
+        total_energy_kWh = heater_energy[-1] / 3.6e6
+        energy_vs_power.append(total_energy_kWh)
+       
+
+        # Save one representative temperature profile (e.g., 6 kW)
+        if power == 6000:
+            results[name]["T"] = T
+            results[name]["heater"] = heater_state
+
+    # Store full power sweep results
+    results[name]["heater_powers"] = heater_powers
+    results[name]["energy_vs_power"] = np.array(energy_vs_power)
+
+    min_energy = np.min(energy_vs_power)
+    optimal_power = heater_powers[np.argmin(energy_vs_power)]
+    results[name]["min_energy_kWh"] = min_energy
+    results[name]["optimal_power_W"] = optimal_power
+    
+
+
+for name, data in results.items():
+    plt.figure(figsize=(12,5))
+
+    plt.plot(data["heater_powers"]/1000, data["energy_vs_power"], 'o-', label="Heater Energy")
+    plt.xlabel("Heater Power (kW)")
+    plt.ylabel("Total Energy Used (kWh)")
+    plt.title(f"{name} – Heater Energy vs Power")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.legend()
+    plt.show()
+
+
+expected = [
+    "Polymide Nanofiber Films",
+    "Ta2O5, SiN, SiO2 Film",
+    "Hughson White Paint A276",
+    "Bare Polished Aluminum",
+]
+
+missing = [n for n in expected if n not in results]
+if missing:
+    print("Warning: missing results for coatings:", missing)
+
+def get_optimal(name):
+    entry = results.get(name)
+    if entry is None:
+        return 0
+    return entry.get("optimal_power_W", 0)
+
+min_power_1 = get_optimal("Polymide Nanofiber Films")
+min_power_2 = get_optimal("Ta2O5, SiN, SiO2 Film")
+min_power_3 = get_optimal("Hughson White Paint A276")
+min_power_4 = get_optimal("Bare Polished Aluminum")
+
+coatings = {
+    'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93, 'power': min_power_1},
+    'Ta2O5, SiN, SiO2 Film': {'alpha': 0.110, 'epsilon': 0.750, 'power': min_power_2},
+    'Hughson White Paint A276': {'alpha': 0.26, 'epsilon': 0.88, 'power': min_power_3},
+    'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04, 'power': min_power_4}
+}
+
+for name, props in coatings.items():
+    # Explicitly unpack and ensure power is defined for this coating
+    alpha = props['alpha']
+    epsilon = props['epsilon']
+    power = props.get('power', 0)
+
+    # For the long-term temperature evolution use the 1-year time base
+    set_interps_for(time_long)
+    T_sol, heater_state, energy_used = heat_balance_RK4_with_heater(alpha, epsilon, time_long, power)
+    results_temp[name] = {"T": T_sol, "heater": heater_state, "energy_kWh": energy_used, "power": power}
+
+    # Compute average power over the simulation period in Joules per second (W)
+    # energy_used is in kWh; convert to Joules
+    energy_J = energy_used * 3.6e6
+    duration_s = (time_long[-1] - time_long[0])
+    if duration_s > 0:
+        avg_W = energy_J / duration_s
+    else:
+        avg_W = 0.0
+
+    print(f"{name}: Total heater energy = {energy_used:.2f} kWh ({energy_J:,.0f} J) — avg {avg_W:.2f} J/s")
+
+# # Plot temperature curves (use the long, 1-year time base)
+# for name, data in results_temp.items():
+#     plt.figure(figsize=(10,5))
+#     plt.plot(time_long/86400, data["T"], label=f"{name} Temperature")
+#     plt.fill_between(time_long/86400, threshold_low, threshold_high, color='orange', alpha=0.2, label="Heater band")
+#     plt.xlabel("Time (days)")
+#     plt.ylabel("Temperature (K)")
+#     p_kW = data.get('power', 0) / 1000.0
+#     plt.title(f"Temperature Evolution with Heater ({p_kW:.1f} kW) - {name}")
+#     plt.legend()
+#     plt.grid(True)
+#     plt.show()
+
+
+
+
