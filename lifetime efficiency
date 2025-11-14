@@ -1,0 +1,246 @@
+# -*- coding: utf-8 -*-
+"""
+Created on Mon Nov 10 23:31:31 2025
+
+@author: ASUS
+"""
+
+# -*- coding: utf-8 -*-
+"""
+GEO Satellite — 10-Year Total Lifetime Efficiency (CelesTrak-style)
+-------------------------------------------------------------------
+This script reproduces the total lifetime efficiency curve for a GEO satellite
+over 10 years using four multiplicative factors from CelesTrak:
+  1) Earth–Sun distance variation  (≈ ±3.3%)
+  2) Solar declination angle (cos δ)
+  3) GEO eclipse seasons around equinoxes (up to ~70 minutes/day)
+  4) Long-term degradation:
+       - Optical cover:  -7% in year 1, then stable
+       - Solar cells:    -3% in year 1, then -2% each subsequent year
+
+Outputs:
+  - CSV (daily time series, annual min/mean/max)
+  - Plots:
+      * geo_total_efficiency_daily.png              (daily + smoothed)
+      * geo_total_efficiency_annual_mean.png        (per-year mean)
+      * geo_total_efficiency_year1_components.png   (factors, Year 1)
+"""
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+
+# =========================
+# Configuration
+# =========================
+@dataclass
+class ModelConfig:
+    start_year: int = 2025
+    years: int = 10                       # <-- 10 years
+    # GEO eclipse seasons (around equinoxes)
+    eclipse_halfwidth_days: float = 22.5  # ±22.5 days -> ~45-day seasons
+    eclipse_peak_minutes: float = 70.0    # peak ~70 min/day shadow
+    # Declination model
+    decl_amp_deg: float = 23.44
+    decl_phase_shift_day: int = 80        # ~ vernal equinox DOY
+    # Earth–Sun distance model
+    ecc_amp: float = 0.033                # ±3.3%
+    ecc_perihelion_shift_day: int = 3     # ~ Jan 3
+    # Degradation model
+    optical_drop_year1: float = 0.07      # -7% after year 1 (optical)
+    cell_drop_year1: float = 0.03         # -3% year 1 (cells)
+    cell_drop_each_later_year: float = 0.02  # -2%/yr afterwards
+    # Smoothing for display (rolling mean on daily series)
+    smooth_days: int = 120                # try 90 / 120 / 180 / 365
+    # File prefix
+    out_prefix: str = "geo_total_efficiency"
+
+
+# =========================
+# Helper functions
+# =========================
+def to_doy(d: datetime) -> int:
+    """Day-of-year 1..365 (idealized: 365 days/year)."""
+    return (d - datetime(d.year, 1, 1)).days + 1
+
+
+def solar_distance_eff(n, amp=0.033, shift=3):
+    """1 + 0.033 * cos(2π(n-shift)/365)."""
+    n = np.asarray(n, dtype=float)
+    return 1.0 + amp * np.cos(2*np.pi * (n - shift) / 365.0)
+
+
+def solar_angle_eff(n, decl_amp_deg=23.44, phase_shift=80):
+    """Multiply by cos(δ), δ ≈ 23.44° * sin(2π(n-phase)/365)."""
+    n = np.asarray(n, dtype=float)
+    delta_deg = decl_amp_deg * np.sin(2*np.pi * (n - phase_shift) / 365.0)
+    return np.cos(np.deg2rad(delta_deg))
+
+
+def eclipse_eff(n, centers=(80, 263), halfwidth=22.5, max_minutes=70.0):
+    """
+    GEO eclipse seasons: two raised-cosine dips.
+    Return multiplicative factor averaged over the day.
+    """
+    n = np.asarray(n, dtype=float)
+    eclipse_minutes = np.zeros_like(n)
+    for c in centers:
+        d = np.abs(((n - c + 182.5) % 365) - 182.5)     # circular day distance
+        w = np.where(d <= halfwidth, 0.5*(1 + np.cos(np.pi * d / halfwidth)), 0.0)
+        eclipse_minutes += max_minutes * w
+    return 1.0 - eclipse_minutes / (24.0 * 60.0)
+
+
+def degradation_eff(day_index,
+                    optical_drop_year1=0.07,
+                    cell_drop_year1=0.03,
+                    cell_drop_each_later_year=0.02):
+    """
+    Degradation factor across years:
+      optical: 1.0 in year 0, then ×(1-0.07)
+      cells:   ×(1-0.03)*(1-0.02)^year_num
+    """
+    day_index = np.asarray(day_index, dtype=int)
+    year_num = day_index // 365
+    optical = np.where(year_num == 0, 1.0, 1.0 - optical_drop_year1)
+    cells = (1.0 - cell_drop_year1) * np.power((1.0 - cell_drop_each_later_year), year_num)
+    return optical * cells
+
+
+# =========================
+# Core model
+# =========================
+def build_timeseries(cfg: ModelConfig) -> pd.DataFrame:
+    start_date = datetime(cfg.start_year, 1, 1)
+    total_days = cfg.years * 365
+
+    dates = [start_date + timedelta(days=i) for i in range(total_days)]
+    doy = np.array([((to_doy(d)-1) % 365) + 1 for d in dates])
+    day_idx = np.arange(total_days)
+
+    dist = solar_distance_eff(doy, cfg.ecc_amp, cfg.ecc_perihelion_shift_day)
+    angle = solar_angle_eff(doy, cfg.decl_amp_deg, cfg.decl_phase_shift_day)
+    ecl = eclipse_eff(doy, (80, 263), cfg.eclipse_halfwidth_days, cfg.eclipse_peak_minutes)
+    deg = degradation_eff(day_idx, cfg.optical_drop_year1,
+                          cfg.cell_drop_year1, cfg.cell_drop_each_later_year)
+
+    total = dist * angle * ecl * deg
+    total = np.clip(total, 0.0, 1.2)
+
+    df = pd.DataFrame({
+        "date": dates,
+        "day_of_year": doy,
+        "distance_eff": dist,
+        "angle_eff": angle,
+        "eclipse_eff": ecl,
+        "degradation_eff": deg,
+        "total_eff": total
+    }).set_index("date")
+
+    return df
+
+
+def annual_summary(df: pd.DataFrame) -> pd.DataFrame:
+    """Annual min/mean/max."""
+    out = df["total_eff"].resample("Y").agg(["min", "mean", "max"])
+    out.index = out.index.year
+    return out
+
+
+# =========================
+# Plots
+# =========================
+def plot_total_smoothed(df: pd.DataFrame, cfg: ModelConfig) -> str:
+    """Daily curve (light) + rolling-mean smoothed curve."""
+    path = f"{cfg.out_prefix}_daily.png"
+    plt.figure(figsize=(12, 5))
+    # raw daily
+    plt.plot(df.index, df["total_eff"], color="lightgrey", alpha=0.55, label="Daily")
+    # smoothed
+    smooth = df["total_eff"].rolling(window=cfg.smooth_days, center=True).mean()
+    plt.plot(df.index, smooth, color="tab:blue", linewidth=2.1,
+             label=f"{cfg.smooth_days}-day rolling mean")
+    plt.title(f"Total Lifetime Efficiency — GEO Satellite ({cfg.years} Years)")
+    plt.xlabel("Date")
+    plt.ylabel("Efficiency (fraction of initial)")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.show()
+    return path
+
+
+def plot_annual_mean(df: pd.DataFrame, cfg: ModelConfig) -> str:
+    path = f"{cfg.out_prefix}_annual_mean.png"
+    annual = df["total_eff"].resample("Y").mean()
+    years = annual.index.year
+    plt.figure(figsize=(10, 4))
+    plt.plot(years, annual.values, marker="o", linewidth=2.5, color="tab:orange")
+    plt.title(f"Annual Mean Total Efficiency — {cfg.years} Years")
+    plt.xlabel("Year")
+    plt.ylabel("Mean efficiency")
+    plt.grid(True, linestyle="--", alpha=0.45)
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.show()
+    return path
+
+
+def plot_components_year1(df: pd.DataFrame, cfg: ModelConfig) -> str:
+    """Show the four factors during Year 1 only."""
+    path = f"{cfg.out_prefix}_year1_components.png"
+    end = df.index.min() + timedelta(days=365)
+    mask = (df.index < end)
+    plt.figure(figsize=(12, 5))
+    plt.plot(df.index[mask], df.loc[mask, "distance_eff"], label="Distance")
+    plt.plot(df.index[mask], df.loc[mask, "angle_eff"], label="Angle")
+    plt.plot(df.index[mask], df.loc[mask, "eclipse_eff"], label="Eclipse")
+    plt.plot(df.index[mask], df.loc[mask, "degradation_eff"], label="Degradation")
+    plt.legend()
+    plt.title("Year 1 Efficiency Components (Daily)")
+    plt.xlabel("Date")
+    plt.ylabel("Efficiency factor")
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.show()
+    return path
+
+
+# =========================
+# Entry point
+# =========================
+def main():
+    cfg = ModelConfig()  # 10 years by default
+    df = build_timeseries(cfg)
+
+    # Save CSVs
+    csv_daily = f"{cfg.out_prefix}_daily_{cfg.start_year}_{cfg.start_year+cfg.years-1}.csv"
+    df.to_csv(csv_daily)
+    csv_annual = f"{cfg.out_prefix}_annual_summary.csv"
+    ann = annual_summary(df)
+    ann.to_csv(csv_annual)
+
+    print(f"[OK] Saved daily CSV -> {csv_daily}")
+    print(f"[OK] Saved annual summary -> {csv_annual}")
+    print("\nAnnual min/mean/max:")
+    print(ann.round(4))
+
+    # Plots
+    p1 = plot_total_smoothed(df, cfg)
+    p2 = plot_annual_mean(df, cfg)
+    p3 = plot_components_year1(df, cfg)
+    print(f"[OK] Saved plots -> {p1}, {p2}, {p3}")
+
+    # Console range check
+    min_eff = df["total_eff"].min()
+    max_eff = df["total_eff"].max()
+    mean_eff = df["total_eff"].mean()
+    print(f"\nEfficiency range: {min_eff:.3f} – {max_eff:.3f}")
+    print(f"Mean lifetime efficiency (10y) ≈ {mean_eff:.3f}")
+
+
+if __name__ == "__main__":
+    main()
