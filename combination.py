@@ -244,66 +244,33 @@ for name, props in coatings.items():
     results[name]["energy_vs_power"] = energy_vs_power
 
 
-    # Store full power sweep results but first remove the initial straight-line
-    # region where the heater power is too low to meaningfully heat the sat.
-    
 print("clean try")
 
-# for name, props in coatings.items():
-#     alpha = props['alpha']
-#     epsilon = props['epsilon']
-#     i = 0
-#     while i < (len(energy_vs_power)-(13000-4000)/power_step):
-#         if energy_vs_power[i] in range((n*(0+power_step*i)-1000),(n*(0+power_step*i) + 1000)):
-#             energy_vs_power.remove(energy_vs_power[i])
 
-# ===============================
-# CLEAN ENERGY DATA FOR EACH COATING
-# ===============================
-for name, props in coatings.items():
-    alpha = props['alpha']
-    epsilon = props['epsilon']
-
-# Now process results
 for name in results:
     hp = np.array(results[name]["heater_powers"])
     evp = np.array(results[name]["energy_vs_power"])
 
-    # Skip broken data
     if len(evp) < 2:
         continue
 
-    # Expected straight-line slope (your original idea)
     slope = evp[1] - evp[0]
 
-    # Build mask of values to keep (True = keep)
     mask = np.ones_like(evp, dtype=bool)
 
     for i in range(len(evp)):
         expected = slope * i
 
-        # If evp[i] lies exactly on that line → remove
         if abs(evp[i] - expected) < 1e-6:
             mask[i] = False
 
-    # Apply mask safely
     hp_clean = hp[mask]
     evp_clean = evp[mask]
 
-    # Save cleaned values back into results
     results[name]["heater_powers"] = hp_clean
     results[name]["energy_vs_power"] = evp_clean
 
-    print(f"{name}:")
-    print("  powers:", hp_clean[:10], "...")
-    print("  energies:", evp_clean[:10], "...")
-    print("  count:", len(evp_clean))
-    print()
 
-
-# ===============================
-# FIND LOCAL MINIMUM POWER
-# ===============================
 for name in results:
     hp = results[name]["heater_powers"]
     evp = results[name]["energy_vs_power"]
@@ -312,17 +279,12 @@ for name in results:
         results[name]["optimal_power_W"] = 0
         continue
 
-    # Minimum energy → optimal power
     idx = np.argmin(evp)
     optimal = float(hp[idx])
 
     results[name]["optimal_power_W"] = optimal
     print(f"{name} → optimal power = {optimal} W")
 
-
-# ===============================
-# USER VARIABLES
-# ===============================
 def get_optimal(name):
     entry = results.get(name)
     if entry is None:
@@ -334,11 +296,6 @@ min_power_2 = get_optimal("Ta2O5, SiN, SiO2 Film")
 min_power_3 = get_optimal("Hughson White Paint A276")
 min_power_4 = get_optimal("Bare Polished Aluminum")
 
-print("\nFinal optimal powers:")
-print("Polymide Nanofiber Films:", min_power_1)
-print("Ta2O5, SiN, SiO2 Film:", min_power_2)
-print("Hughson White Paint A276:", min_power_3)
-print("Bare Polished Aluminum:", min_power_4)
 
 print(min_power_1, min_power_2, min_power_3, min_power_4)
 
@@ -355,154 +312,207 @@ for name, data in results.items():
     #plt.show()
 
 
-# coatings = {
-#     'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93, 'power': min_power_1},
-#     'Ta2O5, SiN, SiO2 Film': {'alpha': 0.110, 'epsilon': 0.750, 'power': min_power_2},
-#     'Hughson White Paint A276': {'alpha': 0.26, 'epsilon': 0.88, 'power': min_power_3},
-#     'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04, 'power': min_power_4}
-# }
+coatings = {
+    'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93, 'power': min_power_1},
+    'Ta2O5, SiN, SiO2 Film': {'alpha': 0.110, 'epsilon': 0.750, 'power': min_power_2},
+    'Hughson White Paint A276': {'alpha': 0.26, 'epsilon': 0.88, 'power': min_power_3},
+    'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04, 'power': min_power_4}
+}
 
-# print("year graphing")
+print("year graphing")
 
-# for name, props in coatings.items():
-#     # Explicitly unpack and ensure power is defined for this coating
-#     alpha = props['alpha']
-#     epsilon = props['epsilon']
-#     power = props.get('power', 0)
+for name, props in coatings.items():
+    # Explicitly unpack and ensure power is defined for this coating
+    alpha = props['alpha']
+    epsilon = props['epsilon']
+    power = props.get('power', 0)
 
-#     # For the long-term temperature evolution use the 1-year time base
-#     set_interps_for(time_long)
-#     T_sol, heater_state, energy_used = heat_balance_RK4_with_heater(alpha, epsilon, time_long, power)
-#     results_temp[name] = {"T": T_sol, "heater": heater_state, "energy_kWh": energy_used, "power": power}
+    # For the long-term temperature evolution use the 1-year time base
+    set_interps_for(time_long)
+    T_sol, heater_state, energy_used = heat_balance_RK4_with_heater(alpha, epsilon, time_long, power)
+    results_temp[name] = {"T": T_sol, "heater": heater_state, "energy_kWh": energy_used, "power": power}
 
-#     # Compute average power over the simulation period in Joules per second (W)
-#     # energy_used is in kWh; convert to Joules
-#     energy_J = energy_used * 3.6e6
-#     duration_s = (time_long[-1] - time_long[0])
-#     if duration_s > 0:
-#         avg_W = energy_J / duration_s
-#     else:
-#         avg_W = 0.0
+    # Compute average power over the simulation period in Joules per second (W)
+    # energy_used is in kWh; convert to Joules
+    energy_J = energy_used * 3.6e6
+    duration_s = (time_long[-1] - time_long[0])
+    if duration_s > 0:
+        avg_W = energy_J / duration_s
+    else:
+        avg_W = 0.0
 
-#     print(f"{name}: Total heater energy = {energy_used:.2f} kWh ({energy_J:,.0f} J) — avg {avg_W:.2f} J/s")
+    print(f"{name}: Total heater energy = {energy_used:.2f} kWh ({energy_J:,.0f} J) — avg {avg_W:.2f} J/s")
 
-#     T_init = average_threshold
+    T_init = average_threshold
 
 
-#     T_with, heater_state, energy_kWh = heat_balance_RK4_with_heater(alpha, epsilon, time_year_2, T_init=T_init, heater_power=power)
-#     T_no, _, _ = heat_balance_RK4_with_heater(alpha, epsilon, time_year_2, T_init=T_init, heater_power=0)  # unpack tuple
+    T_with, heater_state, energy_kWh = heat_balance_RK4_with_heater(alpha, epsilon, time_year_2, T_init=T_init, heater_power=power)
+    T_no, _, _ = heat_balance_RK4_with_heater(alpha, epsilon, time_year_2, T_init=T_init, heater_power=0)  # unpack tuple
 
-#     results[name] = {
-#         "T": T_with,
-#         "T_no_heater": T_no,
-#         "heater": heater_state,
-#         "energy_kWh": energy_kWh
-#     }
+    results[name] = {
+        "T": T_with,
+        "T_no_heater": T_no,
+        "heater": heater_state,
+        "energy_kWh": energy_kWh
+    }
 
-#     print(f"{name}: Total heater energy = {energy_kWh:.2f} kWh/year")
+    print(f"{name}: Total heater energy = {energy_kWh:.2f} kWh/year")
 
-# # Eclipse-season window plot (15 days before and after)
-# plt.figure(figsize=(10, 5))
+# Eclipse-season window plot (15 days before and after)
+plt.figure(figsize=(10, 5))
 
-# # define window
-# start_day = 45 # 15 days before first eclipse season start
-# end_day = 75
-# start_time = start_day * 86400.0
-# end_time = end_day * 86400.0
+# define window
+start_day = 45 # 15 days before first eclipse season start
+end_day = 75
+start_time = start_day * 86400.0
+end_time = end_day * 86400.0
 
-# # indices for that window
-# start_idx = np.searchsorted(time_year_2, start_time)
-# end_idx = np.searchsorted(time_year_2, end_time)
+# indices for that window
+start_idx = np.searchsorted(time_year_2, start_time)
+end_idx = np.searchsorted(time_year_2, end_time)
 
-# for name, data in results.items():
-#     plt.plot(time_year_2[start_idx:end_idx]/86400.0,
-#              data["T"][start_idx:end_idx],
-#              label=f"{name} (with heater)")
-#     plt.plot(time_year_2[start_idx:end_idx]/86400.0,
-#              data["T_no_heater"][start_idx:end_idx],
-#              linestyle='--', alpha=0.7,
-#              label=f"{name} (no heater)")
+for name, data in results.items():
+    plt.plot(time_year_2[start_idx:end_idx]/86400.0,
+             data["T"][start_idx:end_idx],
+             label=f"{name} (with heater)")
+    plt.plot(time_year_2[start_idx:end_idx]/86400.0,
+             data["T_no_heater"][start_idx:end_idx],
+             linestyle='--', alpha=0.7,
+             label=f"{name} (no heater)")
 
-# # temp upper and lower bounds
-# plt.fill_between([start_day, end_day],
-#                  [threshold_low, threshold_low],
-#                  [threshold_high, threshold_high],
-#                  color='orange', alpha=0.15)
-# plt.fill_betweenx([0,750], [60,60], [75,75], color='gray', alpha=0.3, label ='Eclipse Period')
+# temp upper and lower bounds
+plt.fill_between([start_day, end_day],
+                 [threshold_low, threshold_low],
+                 [threshold_high, threshold_high],
+                 color='orange', alpha=0.15)
+plt.fill_betweenx([0,750], [60,60], [75,75], color='gray', alpha=0.3, label ='Eclipse Period')
 
-# plt.xlabel("Time (days)")
-# plt.xlim(start_day, end_day)
-# plt.ylabel("Temperature (K)")
-# plt.ylim(0, 750)    
-# plt.title("Temperature Evolution — 15 Days Before & After Eclipse Season")
-# plt.legend(loc='best', fontsize='small')
-# plt.grid(True)
-# #plt.show()
-# # find best coating
-# in_band_fraction = {}
-# for name, data in results.items():
-#     T = data["T"]
-#     fraction_in_band = np.mean((T >= threshold_low) & (T <= threshold_high))
-#     in_band_fraction[name] = fraction_in_band
+plt.xlabel("Time (days)")
+plt.xlim(start_day, end_day)
+plt.ylabel("Temperature (K)")
+plt.ylim(0, 750)    
+plt.title("Temperature Evolution — 15 Days Before & After Eclipse Season")
+plt.legend(loc='best', fontsize='small')
+plt.grid(True)
+#plt.show()
+# find best coating
+in_band_fraction = {}
+for name, data in results.items():
+    T = data["T"]
+    fraction_in_band = np.mean((T >= threshold_low) & (T <= threshold_high))
+    in_band_fraction[name] = fraction_in_band
 
-# best_name = max(in_band_fraction, key=in_band_fraction.get)
-# worst_name = "Bare Polished Aluminum"  # known to be worst as heater energy used = 0 kWh and steady state = 700K
+best_name = max(in_band_fraction, key=in_band_fraction.get)
+worst_name = "Bare Polished Aluminum"  # known to be worst as heater energy used = 0 kWh and steady state = 700K
 
-# # print percentage of year in thresholds
-# print("Fraction of year within thresholds:")
-# for name, frac in in_band_fraction.items():
-#     print(f"  {name}: {frac*100:.1f}%")
+# print percentage of year in thresholds
+print("Fraction of year within thresholds:")
+for name, frac in in_band_fraction.items():
+    print(f"  {name}: {frac*100:.1f}%")
 
-# print(f"\nBest coating: {best_name}")
-# print(f"Worst coating: {worst_name}")
+print(f"\nBest coating: {best_name}")
+print(f"Worst coating: {worst_name}")
 
-# # name of best coating
-# T_best = results[best_name]["T"]
+# name of best coating
+T_best = results[best_name]["T"]
 
-# # calculate deviations
-# below = T_best[T_best < threshold_low]
-# above = T_best[T_best > threshold_high]
+# calculate deviations
+below = T_best[T_best < threshold_low]
+above = T_best[T_best > threshold_high]
 
-# if len(below) > 0:
-#     avg_below = np.mean(threshold_low - below)
-#     max_below = np.max(threshold_low - below)
-# else:
-#     avg_below = 0.0
-#     max_below = 0.0
+if len(below) > 0:
+    avg_below = np.mean(threshold_low - below)
+    max_below = np.max(threshold_low - below)
+else:
+    avg_below = 0.0
+    max_below = 0.0
 
-# if len(above) > 0:
-#     avg_above = np.mean(above - threshold_high)
-#     max_above = np.max(above - threshold_high)
-# else:
-#     avg_above = 0.0
-#     max_above = 0.0
+if len(above) > 0:
+    avg_above = np.mean(above - threshold_high)
+    max_above = np.max(above - threshold_high)
+else:
+    avg_above = 0.0
+    max_above = 0.0
 
-# # print results
-# print(f"\n--- Deviation analysis for ({best_name}) ---")
-# print(f"Time within band: {in_band_fraction[best_name]*100:.2f}%")
-# print(f"Below threshold: {len(below)/len(T_best)*100:.2f}% of year")
-# print(f"  Avg deviation: {avg_below:.2f} K, Max deviation: {max_below:.2f} K")
-# print(f"Above threshold: {len(above)/len(T_best)*100:.2f}% of year")
-# print(f"  Avg deviation: {avg_above:.2f} K, Max deviation: {max_above:.2f} K")
+# print results
+print(f"\n--- Deviation analysis for ({best_name}) ---")
+print(f"Time within band: {in_band_fraction[best_name]*100:.2f}%")
+print(f"Below threshold: {len(below)/len(T_best)*100:.2f}% of year")
+print(f"  Avg deviation: {avg_below:.2f} K, Max deviation: {max_below:.2f} K")
+print(f"Above threshold: {len(above)/len(T_best)*100:.2f}% of year")
+print(f"  Avg deviation: {avg_above:.2f} K, Max deviation: {max_above:.2f} K")
 
-# # plot worst and best on 6 month plot
-# plt.figure(figsize=(10, 6))
-# months_6_index = np.searchsorted(time_year_2, 182.625*86400.0)
+# plot worst and best on 6 month plot
+plt.figure(figsize=(10, 6))
+months_6_index = np.searchsorted(time_year_2, 182.625*86400.0)
 
-# for name in [best_name, worst_name]:
-#     plt.plot(2*time_year_2[:months_6_index]/year_seconds * 6.0,
-#              results[name]["T"][:months_6_index],
-#              label=f"{name} ({in_band_fraction[name]*100:.1f}% in range)")
+for name in [best_name, worst_name]:
+    plt.plot(2*time_year_2[:months_6_index]/year_seconds * 6.0,
+             results[name]["T"][:months_6_index],
+             label=f"{name} ({in_band_fraction[name]*100:.1f}% in range)")
 
-# # threshold lines
-# plt.axhline(threshold_low, linestyle='--', color='gray', label='Upper and Lower Temp Bounds')
-# plt.axhline(threshold_high, linestyle='--', color='gray')
+# threshold lines
+plt.axhline(threshold_low, linestyle='--', color='gray', label='Upper and Lower Temp Bounds')
+plt.axhline(threshold_high, linestyle='--', color='gray')
 
-# # labels and styling
-# plt.xlabel("Month of Year")
-# plt.xticks(ticks=np.arange(0,6,1), labels=['Jan','Feb','Mar','Apr','May','Jun'])
-# plt.ylabel("Temperature (K)")
-# plt.title("Six-Month Temperature Profile — Best vs Worst Coating (with heater)")
-# plt.grid(True)
-# plt.legend()
+# labels and styling
+plt.xlabel("Month of Year")
+plt.xticks(ticks=np.arange(0,6,1), labels=['Jan','Feb','Mar','Apr','May','Jun'])
+plt.ylabel("Temperature (K)")
+plt.title("Six-Month Temperature Profile — Best vs Worst Coating (with heater)")
+plt.grid(True)
+plt.legend()
 plt.show()
+
+# choose time array for daily analysis (use full-year sampling you used elsewhere)
+# Analyze worst day but only between day 59 and day 99 with 10 min steps
+day_start = 59
+day_end = 99
+dt_seconds = 10 * 60  # 10 minutes
+
+t0 = day_start * 86400.0
+t1 = day_end * 86400.0
+time_window = np.arange(t0, t1 + dt_seconds, dt_seconds)
+
+h = float(dt_seconds)  # seconds per sample
+
+for name, data in results.items():
+    alpha = coatings[name]['alpha']
+    epsilon = coatings[name]['epsilon']
+    power_W = data.get("optimal_power_W")
+    if power_W is None:
+        print(f"{name}: no optimal power found, skipping")
+        continue
+
+    # build interpolators for this time window
+    set_interps_for(time_window)
+
+    # Run RK4 simulation on this window to get heater_state array
+    T_sim, heater_state, _ = heat_balance_RK4_with_heater(alpha, epsilon, time_window, power_W)
+
+    # instantaneous power (W)
+    P_inst = heater_state * power_W
+
+    # robust binning: assign each sample to a day index starting at day_start
+    day_idx = np.floor((time_window - t0) / 86400.0).astype(int)
+    energy_J_per_sample = P_inst * h
+
+    # sum energy per day using np.bincount
+    max_day = day_idx.max()
+    energy_by_day_J = np.bincount(day_idx, weights=energy_J_per_sample, minlength=max_day+1)
+    energy_by_day_kWh = energy_by_day_J / 3.6e6
+
+    worst_local = int(np.argmax(energy_by_day_kWh))
+    worst_energy_kWh = float(energy_by_day_kWh[worst_local])
+    worst_avg_power_W = (worst_energy_kWh * 3.6e6) / 86400.0
+
+    calendar_day = day_start + worst_local
+    print(f"{name}: worst day in window = day {calendar_day} (index {worst_local}) -> "
+          f"{worst_energy_kWh:.3f} kWh, avg {worst_avg_power_W:.2f} W")
+    
+
+energy = 26.25 # kWh
+
+I_sun = 1361.0          # solar flux at GEO (W/m²)
+eta_panel = 0.25        # solar cell efficiency (30%)
+eta_sys = 0.40          # overall power system efficiency (DC/DC, battery, etc.)
