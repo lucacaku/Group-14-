@@ -1,9 +1,12 @@
-import scipy as sp
+#import any necessary libraries
 import numpy as np
 import matplotlib.pyplot as plt
 from scipy.interpolate import interp1d
+import pandas as pd
+from datetime import datetime
+import io
 
-# Constants 
+#define constants and parameters
 sigma = 5.67e-8
 solar_constant = 1361
 albedo = 0.3
@@ -12,76 +15,69 @@ mass_of_earth = 5.972e24
 
 threshold_low = 293
 threshold_high = 313
+c = 900.0  #specific heat capacity J/(kg·K)
 
-# User Input 
+#user defined satellite geometry and mass
 height = float(input("Input a height for your satellite (1 - 5 m): "))
 width = float(input("Input a width for your satellite (1 - 5 m): "))
 depth = float(input("Input a depth for your satellite (3 - 7 m): "))
-mass = float(input("Input a mass for your satellite (1000 - 3000 kg): "))
+mass = float(input("Input a mass for your satellite (1000 - 4000 kg): "))
 
-c = 900.0
-
+#initialise coating properties array
 coatings = {
     'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93},
     'Ta2O5, SiN, SiO2 Film': {'alpha': 0.110, 'epsilon': 0.750},
     'Hughson White Paint A276': {'alpha': 0.26, 'epsilon': 0.88},
-    'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04}
+    'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04} #establish baseline coating
 }
 
-# Orbital Parameters 
+#define orbital parameters and time arrays
 altitude = 35786e3
 earth_radius = 6371e3
 year_seconds = 365.25 * 24 * 3600
 
 orbital_radius = earth_radius + altitude
-orbital_period = 2 * np.pi * np.sqrt(orbital_radius**3 / (Gravitational_constant * mass_of_earth))
+orbital_period = 2 * np.pi * np.sqrt(orbital_radius**3 / (Gravitational_constant * mass_of_earth)) #Keplers 3rd law (~23.93 hours)
 
-dt = 10 * 60
+dt = 10 * 60 #small timestep so accurate, not too small to be slow
 day_start = 0
 sim_days = 365
 simulation_start = day_start * 24 * 3600
 simulation_end = (day_start + sim_days) * 24 * 3600
 
-# Time arrays
-time_year = np.arange(simulation_start, simulation_end + dt, dt)
-time_orbit = np.arange(0, orbital_period + dt, dt)
-time_orbit_2 = np.linspace(0, orbital_period, 1000)
-time_year_2 = np.linspace(0, year_seconds, int(year_seconds / dt))
+time_orbit = np.linspace(0, orbital_period, 1000)
+time_year = np.linspace(0, year_seconds, int(year_seconds / dt))
 
 time_sweep_start = simulation_start
 time_sweep_days = 3
 time_sweep = np.arange(time_sweep_start, time_sweep_start + time_sweep_days * 24 * 3600 + dt, dt)
 
 time_long_start = simulation_start
-time_long = np.arange(time_long_start, time_long_start + year_seconds + dt, dt)
 
-# Eclipse & Area Functions 
+#eclipse and area functions
 def eclipse_mask(t):
-    """Return True if satellite is in Earth's shadow."""
-    day = (t / 86400) % 365.25
-    season1 = (day > 59) & (day < 99)
+    day = np.atleast_1d(t / 86400) % 365.25
+    season1 = (day > 59) & (day < 99) #defined eclipse seasons sync with earth equinoxes due to GEO orbit
     season2 = (day > 239) & (day < 279)
     in_season = season1 | season2
 
     eclipse_duration = 0.0708 * 86400
-    orbit_phase = t % orbital_period
+    orbit_phase = np.atleast_1d(t) % orbital_period #handles scalar and array inputs for time
     in_eclipse = orbit_phase < eclipse_duration
 
     return in_season & in_eclipse
 
-
 def set_interps_for(time_array):
-    """Create interpolators for presented area, sunlight, and Earth view factor."""
     global A_pres_interp, sunlight_interp, A_earth_interp
 
-    sunlight = np.where(eclipse_mask(time_array), 0, 1)
+    sunlight = np.where(eclipse_mask(time_array), 0, 1) #binary, 0 if shade, 1 if sun
 
-    # Tile one-orbit area profile across full time array
+    #tile presented area over orbits to match time_array length
     theta_rad = np.pi/4 * np.sin(2 * np.pi * time_orbit / orbital_period)
-    A_presented_orbit = height * (np.abs(width * np.cos(theta_rad)) + np.abs(depth * np.sin(theta_rad)))
+    A_presented_orbit = height * (np.abs(width * np.cos(theta_rad)) + np.abs(depth * np.sin(theta_rad))) #formula assumes single plane rotation
 
     reps = int(np.ceil(len(time_array) / len(A_presented_orbit)))
-    A_presented = np.tile(A_presented_orbit, reps)[:len(time_array)]
+    A_presented = np.tile(A_presented_orbit, reps)[:len(time_array)] 
 
     half_angle_earth = np.arcsin(earth_radius / orbital_radius)
     A_earth_orbit = np.pi * (earth_radius**2) * (1 - np.cos(half_angle_earth))
@@ -91,26 +87,22 @@ def set_interps_for(time_array):
     sunlight_interp = interp1d(time_array, sunlight, kind='nearest', fill_value='extrapolate')
     A_earth_interp = interp1d(time_array, A_earth, kind='nearest', fill_value='extrapolate')
 
-
-set_interps_for(time_year_2)
-
-# Thermal Model 
+#thermal modelling functions
 def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
-    """Compute dT/dt and heater state."""
-    T = np.clip(float(T), 0, 750)
+    T = np.clip(float(T), 0, 750) #prevent unphysical temperatures
 
     A_pres = float(A_pres_interp(t))
     is_sunlit = float(sunlight_interp(t))
     A_earth_local = float(A_earth_interp(t))
 
     Q_solar = alpha * solar_constant * is_sunlit * A_pres
-    Q_albedo = solar_constant * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2))
+    Q_albedo = solar_constant * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2)) #assumes reflected sun is uniform hemisphere
     Q_ir_loss = epsilon * sigma * (T**4) * A_pres
 
-    if T < threshold_low:
+    if T < threshold_low: #heater turns on at low threshold, off at high threshold
         heater_state = 1
     elif T > threshold_high:
-        heater_state = 0
+        heater_state = 0 #not threshold_high - delta, prevents energy waste by rapid switching
 
     Q_heater = heater_power * heater_state
     Q_net = Q_solar + Q_albedo + Q_heater - Q_ir_loss
@@ -118,9 +110,7 @@ def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
 
     return dTdt, heater_state, Q_heater
 
-
-def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_init=300.0):
-    """Integrate temperature using RK4 method."""
+def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_init=300.0): #runge-kutta 4th order
     n = len(time_array)
     T = np.zeros(n)
     heater_state = np.zeros(n)
@@ -133,8 +123,8 @@ def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_ini
         t = time_array[i]
         h = time_array[i + 1] - time_array[i]
 
-        # RK4 slopes
-        k1, h1_state, Qh1 = thermal_rhs(t, T[i], alpha, epsilon, heater_state[i], heater_power)
+        #rk4 slopes
+        k1, h1_state, Qh1 = thermal_rhs(t, T[i], alpha, epsilon, heater_state[i], heater_power) 
         k2, h2_state, Qh2 = thermal_rhs(t + h/2, T[i] + h/2*k1, alpha, epsilon, h1_state, heater_power)
         k3, h3_state, Qh3 = thermal_rhs(t + h/2, T[i] + h/2*k2, alpha, epsilon, h2_state, heater_power)
         k4, h4_state, Qh4 = thermal_rhs(t + h, T[i] + h*k3, alpha, epsilon, h3_state, heater_power)
@@ -144,11 +134,13 @@ def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_ini
         heater_state[i+1] = h4_state
         heater_energy[i+1] = heater_energy[i] + Qh4 * h
 
-    total_energy_kWh = heater_energy[-1] / 3.6e6
+    total_energy_kWh = heater_energy[-1] / 3.6e6 #convert from joules to kWh
     return T, heater_state, total_energy_kWh
 
-# Heater Power Sweep 
-heater_powers = np.arange(3000, 13000, 200)
+set_interps_for(time_sweep)
+
+#heater power sweep to find optimal power for each coating
+heater_powers = np.arange(3000, 13000, 200) # tests 3-13 kW in 200 W increments
 results = {}
 
 for name, props in coatings.items():
@@ -156,7 +148,7 @@ for name, props in coatings.items():
     energy_vs_power = []
 
     for power in heater_powers:
-        _, _, energy_kWh = heat_balance_RK4_with_heater(alpha, epsilon, time_sweep, power)
+        _, _, energy_kWh = heat_balance_RK4_with_heater(alpha, epsilon, time_sweep, power) #three day window around eclipse, applies to a full year
         energy_vs_power.append(energy_kWh)
 
     optimal_power = heater_powers[np.argmin(energy_vs_power)]
@@ -166,42 +158,31 @@ for name, props in coatings.items():
         "optimal_power": optimal_power
     }
 
-    # Plot power sweep
-    plt.figure(figsize=(10, 5))
-    plt.plot(heater_powers/1000, energy_vs_power, 'o-')
-    plt.xlabel("Heater Power (kW)")
-    plt.ylabel("Total Energy Used (kWh)")
-    plt.title(f"{name} – Heater Energy vs Power")
-    plt.grid(True)
-    plt.tight_layout()
-
-# Full-Year Simulation 
-set_interps_for(time_long)
+#full year simulation with optimal heater powers
+set_interps_for(time_year)
 
 for name, props in coatings.items():
     alpha, epsilon = props['alpha'], props['epsilon']
-    power = results[name]["optimal_power"]
+    power = results[name]["optimal_power"] #use previously found optimal power
 
-    T_with, heater_state, energy_kWh = heat_balance_RK4_with_heater(alpha, epsilon, time_year_2, power)
-    T_no, _, _ = heat_balance_RK4_with_heater(alpha, epsilon, time_year_2, 0)
+    T_with, heater_state, energy_kWh = heat_balance_RK4_with_heater(alpha, epsilon, time_year, power)
 
     results[name].update({
         "T": T_with,
-        "T_no_heater": T_no,
         "heater": heater_state,
         "energy_kWh": energy_kWh
     })
 
     print(f"{name}: {energy_kWh:.2f} kWh/year at {power:.0f} W Heater Power")
 
-# Analysis & Plotting 
+#storing results and analysis
 in_band_fraction = {name: np.mean((data["T"] >= threshold_low) & (data["T"] <= threshold_high))
                     for name, data in results.items()}
 
 best_name = max(in_band_fraction, key=in_band_fraction.get)
 T_best = results[best_name]["T"]
 
-# Deviation analysis
+#analysis of deviations from temperature band
 below = T_best[T_best < threshold_low]
 above = T_best[T_best > threshold_high]
 
@@ -217,65 +198,202 @@ print(f"  Avg: {avg_below:.2f} K, Max: {max_below:.2f} K")
 print(f"Above threshold: {len(above)/len(T_best)*100:.2f}%")
 print(f"  Avg: {avg_above:.2f} K, Max: {max_above:.2f} K")
 
-# Multi-objective scoring
-print("\n--- Multi-Objective Optimization ---")
+#scoring based off energy use, in-band time, heater power
+scorable = [n for n in results.keys() if n != "Bare Polished Aluminum"]
+
+powers = np.array([results[n]["optimal_power"] for n in scorable], dtype=float)
+energies = np.array([results[n]["energy_kWh"] for n in scorable], dtype=float)
+inbands = np.array([in_band_fraction[n] for n in scorable], dtype=float)
+
+def norm_lower_better(x):
+    xmin, xmax = x.min(), x.max()
+    if np.isclose(xmax, xmin):
+        return np.ones_like(x)
+    return 1.0 - (x - xmin) / (xmax - xmin)
+
+def norm_higher_better(x):
+    xmin, xmax = x.min(), x.max()
+    if np.isclose(xmax, xmin):
+        return np.ones_like(x)
+    return (x - xmin) / (xmax - xmin)
+
+norm_p = norm_lower_better(powers)
+norm_e = norm_lower_better(energies)
+norm_i = norm_higher_better(inbands)
+
+w_inband, w_energy, w_power = 0.3, 0.3, 0.4
+
 scores = {}
-
-for name, data in results.items():
-    if name == "Bare Polished Aluminum":
-        continue
-
-    in_band = np.mean((data["T"] >= threshold_low) & (data["T"] <= threshold_high))
-    power_used = data["energy_kWh"]
-
-    in_band_score = in_band
-    power_score = 1.0 - np.clip(power_used / 100.0, 0, 1)
-    combined_score = 0.5 * in_band_score + 0.5 * power_score
-
+for idx, name in enumerate(scorable):
+    combined = (w_inband * norm_i[idx] + w_energy * norm_e[idx] + w_power * norm_p[idx])
     scores[name] = {
-        "in_band": in_band * 100,
-        "energy_kWh": power_used,
-        "combined_score": combined_score
+        "in_band": in_band_fraction[name] * 100,
+        "energy_kWh": results[name]["energy_kWh"],
+        "optimal_power_W": results[name]["optimal_power"],
+        "combined_score": combined
     }
+    print(f"{name}: {in_band_fraction[name]*100:.2f}% in-band, {results[name]['energy_kWh']:.2f} kWh/year, "
+          f"{results[name]['optimal_power']:.0f} W heater → score={combined:.3f}")
 
-    print(f"{name}: {in_band*100:.2f}% in-band, {power_used:.2f} kWh at heater power {power:.0f}, score={combined_score:.3f}")
-
-best_balanced = max(scores, key=lambda x: scores[x]["combined_score"])
+best_balanced = max(scores, key=lambda x: scores[x]["combined_score"]) if scores else None
 print(f"\n→ Best balanced choice: {best_balanced}")
 
-# Final Plots 
-# Eclipse-season window
-plt.figure(figsize=(10, 5))
-start_day, end_day = 45, 75
-start_idx = np.searchsorted(time_year_2, start_day * 86400.0)
-end_idx = np.searchsorted(time_year_2, end_day * 86400.0)
+#window around eclipse season for plotting
+def plot_eclipse_season():
+    plt.figure(figsize=(10, 5))
+    start_day, end_day = 45, 75
+    start_idx = np.searchsorted(time_year, start_day * 86400.0)
+    end_idx = np.searchsorted(time_year, end_day * 86400.0)
 
+    for name, data in results.items():
+        plt.plot(time_year[start_idx:end_idx]/86400.0, data["T"][start_idx:end_idx], label=f"{name}")
+
+    plt.fill_between([start_day, end_day], [threshold_low, threshold_low], [threshold_high, threshold_high], 
+                    color='orange', alpha=0.3)
+    plt.fill_betweenx([0,750], 60, 75, color = 'gray', alpha = 0.3)
+    plt.xlabel("Time (days)")
+    plt.ylabel("Temperature (K)")
+    plt.title("Temperature Evolution – Eclipse Season")
+    plt.legend(fontsize='small')
+    plt.grid(True)
+    return plt.gcf()
+
+#six month comparison of worst and best coatings
+def create_six_month_plot():
+    plt.figure(figsize=(10, 6))
+    months_6_idx = np.searchsorted(time_year, 182.625 * 86400.0)
+
+    for name in [best_balanced, "Bare Polished Aluminum"]:
+        plt.plot(2 * time_year[:months_6_idx] / year_seconds * 6.0, results[name]["T"][:months_6_idx],
+                label=f"{name} ({in_band_fraction[name]*100:.1f}%)")
+
+    plt.axhline(threshold_low, linestyle='--', color='gray')
+    plt.axhline(threshold_high, linestyle='--', color='gray')
+    plt.xlabel("Month")
+    plt.xticks(ticks=np.arange(0, 6, 1), labels=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'])
+    plt.ylabel("Temperature (K)")
+    plt.title("Six-Month Temperature Profile")
+    plt.legend()
+    plt.grid(True)
+    return plt.gcf()
+
+#create output data for excel
+output_data = []
+
+#satellite dimensions section
+output_data.append(['SATELLITE DIMENSIONS', '', ''])
+output_data.append(['Height', f"{height:.2f}", 'm'])
+output_data.append(['Width', f"{width:.2f}", 'm'])
+output_data.append(['Depth', f"{depth:.2f}", 'm'])
+output_data.append(['Mass', f"{mass:.0f}", 'kg'])
+output_data.append(['Specific Heat Capacity', f"{c:.1f}", 'J/kg·K'])
+output_data.append(['', '', ''])
+
+#orbital geometry section
+output_data.append(['ORBITAL GEOMETRY', '', ''])
+output_data.append(['Orbital Altitude', f"{altitude/1e3:.0f}", 'km'])
+output_data.append(['Orbital Radius', f"{orbital_radius/1e3:.0f}", 'km'])
+output_data.append(['Orbital Period', f"{orbital_period/3600:.2f}", 'hours'])
+output_data.append(['Earth Radius', f"{earth_radius/1e3:.0f}", 'km'])
+output_data.append(['', '', ''])
+
+#thermal parameters section
+output_data.append(['THERMAL PARAMETERS', '', ''])
+output_data.append(['Temperature Threshold Low', f"{threshold_low:.0f}", 'K'])
+output_data.append(['Temperature Threshold High', f"{threshold_high:.0f}", 'K'])
+output_data.append(['Solar Constant', f"{solar_constant}", 'W/m²'])
+output_data.append(['Albedo', f"{albedo}", ''])
+output_data.append(['Stefan-Boltzmann Constant', f"{sigma}", 'W/m²·K⁴'])
+output_data.append(['', '', ''])
+
+#best coating summary section
+output_data.append(['BEST COATING', '', ''])
+output_data.append(['Coating Name', best_balanced, ''])
+output_data.append(['Solar Absorptivity', f"{coatings[best_balanced]['alpha']:.4f}", ''])
+output_data.append(['Thermal Emissivity', f"{coatings[best_balanced]['epsilon']:.4f}", ''])
+output_data.append(['Optimal Heater Power', f"{results[best_balanced]['optimal_power']:.0f}", 'W'])
+output_data.append(['Annual Energy Usage', f"{results[best_balanced]['energy_kWh']:.2f}", 'kWh'])
+output_data.append(['Time In-Band', f"{in_band_fraction[best_balanced]*100:.2f}", '%'])
+output_data.append(['Time Below Threshold', f"{len(below)/len(T_best)*100:.2f}", '%'])
+output_data.append(['Avg Deviation Below', f"{avg_below:.2f}", 'K'])
+output_data.append(['Max Deviation Below', f"{max_below:.2f}", 'K'])
+output_data.append(['Time Above Threshold', f"{len(above)/len(T_best)*100:.2f}", '%'])
+output_data.append(['Avg Deviation Above', f"{avg_above:.2f}", 'K'])
+output_data.append(['Max Deviation Above', f"{max_above:.2f}", 'K'])
+output_data.append(['', '', ''])
+
+#comparison of all coatings
+output_data.append(['ALL COATINGS COMPARISON', '', ''])
+output_data.append(['Coating', 'Alpha', 'Epsilon', 'Optimal Power (W)', 'Energy (kWh)', 'In-Band (%)'])
 for name, data in results.items():
-    plt.plot(time_year_2[start_idx:end_idx]/86400.0, data["T"][start_idx:end_idx], label=f"{name}")
+    in_band_pct = in_band_fraction[name] * 100
+    output_data.append([
+        name,
+        f"{coatings[name]['alpha']:.4f}",
+        f"{coatings[name]['epsilon']:.4f}",
+        f"{data['optimal_power']:.0f}",
+        f"{data['energy_kWh']:.2f}",
+        f"{in_band_pct:.2f}",
+    ])
 
-plt.fill_between([start_day, end_day], [threshold_low, threshold_low], [threshold_high, threshold_high], 
-                 color='orange', alpha=0.15)
-plt.fill_betweenx([0,750], 60, 75, color = 'gray', alpha = 0.1)
-plt.xlabel("Time (days)")
-plt.ylabel("Temperature (K)")
-plt.title("Temperature Evolution – Eclipse Season")
-plt.legend(fontsize='small')
-plt.grid(True)
+#export results to Excel with graphs
+print("\n--- Exporting results to Excel ---")
+timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+excel_file = f"satellite_analysis_{timestamp}.xlsx"
 
-# Six-month comparison
-plt.figure(figsize=(10, 6))
-months_6_idx = np.searchsorted(time_year_2, 182.625 * 86400.0)
+#create main analysis sheet
+with pd.ExcelWriter(excel_file, engine='openpyxl') as writer:
+    #summary data sheet
+    output_df = pd.DataFrame(output_data)
+    output_df.to_excel(writer, sheet_name='Analysis', index=False, header=False)
 
-for name in [best_balanced, "Bare Polished Aluminum"]:
-    plt.plot(2 * time_year_2[:months_6_idx] / year_seconds * 6.0, results[name]["T"][:months_6_idx],
-             label=f"{name} ({in_band_fraction[name]*100:.1f}%)")
+#add graphs to excel 
+from openpyxl import load_workbook
+from openpyxl.drawing.image import Image as XLImage
+wb = load_workbook(excel_file)
 
-plt.axhline(threshold_low, linestyle='--', color='gray')
-plt.axhline(threshold_high, linestyle='--', color='gray')
-plt.xlabel("Month")
-plt.xticks(ticks=np.arange(0, 6, 1), labels=['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun'])
-plt.ylabel("Temperature (K)")
-plt.title("Six-Month Temperature Profile")
-plt.legend()
-plt.grid(True)
-plt.show()
+#create graphs
+fig_eclipse = plot_eclipse_season()
+fig_six = create_six_month_plot()
+
+#save figures to bytes
+img_eclipse = io.BytesIO()
+fig_eclipse.savefig(img_eclipse, format='png', dpi=100)
+img_eclipse.seek(0)
+plt.close(fig_eclipse)
+img_six = io.BytesIO()
+fig_six.savefig(img_six, format='png', dpi=100)
+img_six.seek(0)
+plt.close(fig_six)
+
+#add graph sheets
+ws_eclipse = wb.create_sheet('Eclipse Season Graph')
+ws_six = wb.create_sheet('Six Month Graph')
+
+#populate sheets with images
+xl_img_eclipse = XLImage(img_eclipse)
+xl_img_six = XLImage(img_six)
+
+ws_eclipse.add_image(xl_img_eclipse, 'A1')
+ws_six.add_image(xl_img_six, 'A1')
+
+#save workbook
+wb.save(excel_file)
+
+print(f"Saved complete analysis to: {excel_file}")
+print("\n--- Excel Sheets Created ---")
+print(f"  1. Analysis - All satellite parameters and coating comparison")
+print(f"  2. Eclipse Season Graph - Temperature evolution during eclipse season")
+print(f"  3. Six Month Graph - Six-month temperature comparison")
+
+print("\n--- Export Summary ---")
+print(f"Satellite dimensions: {height}m H × {width}m W × {depth}m D, Mass: {mass}kg")
+print(f"Orbital geometry: Altitude {altitude/1e3:.0f}km, Period {orbital_period/3600:.2f}h")
+print(f"Best coating: {best_name}")
+print(f"  → Energy: {results[best_name]['energy_kWh']:.2f} kWh/year at {results[best_name]['optimal_power']:.0f}W")
+print(f"  → Performance: {in_band_fraction[best_name]*100:.2f}% in-band")
+print(f"Best balanced: {best_balanced}")
+print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {results[best_balanced]['optimal_power']:.0f}W")
+print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
+print("\nExport complete!")
+
