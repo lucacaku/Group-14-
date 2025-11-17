@@ -17,11 +17,24 @@ threshold_low = 293
 threshold_high = 313
 c = 900.0  #specific heat capacity J/(kg·K)
 
-#user defined satellite geometry and mass
-height = float(input("Input a height for your satellite (1 - 5 m): "))
-width = float(input("Input a width for your satellite (1 - 5 m): "))
-depth = float(input("Input a depth for your satellite (3 - 7 m): "))
-mass = float(input("Input a mass for your satellite (1000 - 4000 kg): "))
+#user defined satellite geometry and mass plus error handling to prevent unrealistic values
+def _get_float_input(prompt, min_val, max_val):
+    while True:
+        try:
+            s = input(f"{prompt} [{min_val} - {max_val}]: ")
+            val = float(s)
+        except ValueError:
+            print("Invalid input — enter a numeric value.")
+            continue
+        if not (min_val <= val <= max_val):
+            print(f"Out of range — enter a value between {min_val} and {max_val}.")
+            continue
+        return val
+
+height = _get_float_input("Input a height for your satellite (m)", 1.0, 5.0)
+width  = _get_float_input("Input a width for your satellite (m)", 1.0, 5.0)
+depth  = _get_float_input("Input a depth for your satellite (m)", 3.0, 7.0)
+mass   = _get_float_input("Input a mass for your satellite (kg)", 1000.0, 4000.0)
 
 #initialise coating properties array
 coatings = {
@@ -396,4 +409,5 @@ print(f"Best balanced: {best_balanced}")
 print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {results[best_balanced]['optimal_power']:.0f}W")
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
+
 
