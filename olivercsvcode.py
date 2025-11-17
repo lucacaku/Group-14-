@@ -37,6 +37,7 @@ width  = _get_float_input("Input a width for your satellite (m)", 1.0, 5.0)
 depth  = _get_float_input("Input a depth for your satellite (m)", 3.0, 7.0)
 mass   = _get_float_input("Input a mass for your satellite (kg)", 1000.0, 4000.0)
 
+print("Our code takes a moment to run, bear with us!")
 
 #initialise coating properties array
 coatings = {
@@ -57,7 +58,6 @@ orbital_period = 2 * np.pi * np.sqrt(orbital_radius**3 / (Gravitational_constant
 dt = 10 * 60 #small timestep so accurate, not too small to be slow
 day_start = 0
 sim_days = 365
-simulation_start = day_start * 24 * 3600
 simulation_end = (day_start + sim_days) * 24 * 3600
 
 time_orbit = np.linspace(0, orbital_period, 1000)
@@ -67,7 +67,7 @@ time_sweep_start = simulation_start
 time_sweep_days = 3
 time_sweep = np.arange(time_sweep_start, time_sweep_start + time_sweep_days * 24 * 3600 + dt, dt)
 
-time_long_start = simulation_start
+time_long_start = day_start
 
 #eclipse and area functions
 def eclipse_mask(t):
@@ -222,10 +222,6 @@ for name, props in coatings.items():
     results[name]["heater_powers"] = heater_powers
     results[name]["energy_vs_power"] = energy_vs_power
 
-
-print("clean try")
-
-
 for name in results:
     hp = np.array(results[name]["heater_powers"])
     evp = np.array(results[name]["energy_vs_power"])
@@ -285,15 +281,19 @@ for name, data in results.items():
     plt.grid(True)
     plt.tight_layout()
     plt.legend()
-    plt.show()
 
+plt.show()
+
+print("Our code is still running!")
+
+
+#is there any way to remove this? to just append to our old array?
 coatings = {
     'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93, 'power': min_power_1},
     'Ta2O5, SiN, SiO2 Film': {'alpha': 0.110, 'epsilon': 0.750, 'power': min_power_2},
     'Hughson White Paint A276': {'alpha': 0.26, 'epsilon': 0.88, 'power': min_power_3},
     'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04, 'power': min_power_4}
 }
-
 
 #full year simulation with optimal heater powers
 set_interps_for(time_year)
@@ -533,4 +533,5 @@ print(f"Best balanced: {best_balanced}")
 print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {results[best_balanced]['optimal_power_W']:.0f}W")
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
+
 
