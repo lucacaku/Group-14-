@@ -18,18 +18,32 @@ threshold_high = 313
 average_threshold = (threshold_low + threshold_high) / 2.0
 c = 900.0  #specific heat capacity J/(kg·K)
 
-#user defined satellite geometry and mass
-height = float(input("Input a height for your satellite (1 - 5 m): "))
-width = float(input("Input a width for your satellite (1 - 5 m): "))
-depth = float(input("Input a depth for your satellite (3 - 7 m): "))
-mass = float(input("Input a mass for your satellite (1000 - 4000 kg): "))
+#user defined satellite geometry and mass plus error handling to prevent unrealistic values
+def _get_float_input(prompt, min_val, max_val):
+    while True:
+        try:
+            s = input(f"{prompt} [{min_val} - {max_val}]: ")
+            val = float(s)
+        except ValueError:
+            print("Invalid input — enter a numeric value.")
+            continue
+        if not (min_val <= val <= max_val):
+            print(f"Out of range — enter a value between {min_val} and {max_val}.")
+            continue
+        return val
+
+height = _get_float_input("Input a height for your satellite (m)", 1.0, 5.0)
+width  = _get_float_input("Input a width for your satellite (m)", 1.0, 5.0)
+depth  = _get_float_input("Input a depth for your satellite (m)", 3.0, 7.0)
+mass   = _get_float_input("Input a mass for your satellite (kg)", 1000.0, 4000.0)
+
 
 #initialise coating properties array
 coatings = {
     'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93},
     'Ta2O5, SiN, SiO2 Film': {'alpha': 0.110, 'epsilon': 0.750},
     'Hughson White Paint A276': {'alpha': 0.26, 'epsilon': 0.88},
-    'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04} #establish baseline coating
+    'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04}, #establish baseline coating
 }
 
 #define orbital parameters and time arrays
@@ -141,7 +155,7 @@ def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_ini
 set_interps_for(time_sweep)
 
 #heater power sweep to find optimal power for each coating
-heater_powers = np.arange(0000, 13000, 200) # tests 0-13 kW in 200 W increments
+heater_powers = np.arange(0000, 15000, 200) # tests 0-15 kW in 200 W increments
 results = {}
 
 
@@ -260,6 +274,18 @@ min_power_1 = get_optimal("Polymide Nanofiber Films")
 min_power_2 = get_optimal("Ta2O5, SiN, SiO2 Film")
 min_power_3 = get_optimal("Hughson White Paint A276")
 min_power_4 = get_optimal("Bare Polished Aluminum")
+
+for name, data in results.items():
+    plt.figure(figsize=(12,5))
+
+    plt.plot(data["heater_powers"]/1000, data["energy_vs_power"], 'o-', label="Heater Energy")
+    plt.xlabel("Heater Power (kW)")
+    plt.ylabel("Total Energy Used (kWh)")
+    plt.title(f"{name} – Heater Energy vs Power")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.legend()
+    plt.show()
 
 coatings = {
     'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93, 'power': min_power_1},
@@ -508,4 +534,3 @@ print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {re
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
 
-plt.show()
