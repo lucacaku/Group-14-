@@ -17,7 +17,6 @@ threshold_low = 293
 threshold_high = 313
 c = 900.0  #specific heat capacity J/(kg·K)
 
-#user defined satellite geometry and mass plus error handling to prevent unrealistic values
 def _get_float_input(prompt, min_val, max_val):
     while True:
         try:
@@ -55,17 +54,13 @@ orbital_period = 2 * np.pi * np.sqrt(orbital_radius**3 / (Gravitational_constant
 dt = 10 * 60 #small timestep so accurate, not too small to be slow
 day_start = 0
 sim_days = 365
-simulation_start = day_start * 24 * 3600
-simulation_end = (day_start + sim_days) * 24 * 3600
+simulation_end = sim_days * 24 * 3600
 
 time_orbit = np.linspace(0, orbital_period, 1000)
 time_year = np.linspace(0, year_seconds, int(year_seconds / dt))
 
-time_sweep_start = simulation_start
 time_sweep_days = 3
-time_sweep = np.arange(time_sweep_start, time_sweep_start + time_sweep_days * 24 * 3600 + dt, dt)
-
-time_long_start = simulation_start
+time_sweep = np.arange(day_start, time_sweep_days * 24 * 3600 + dt, dt)
 
 #eclipse and area functions
 def eclipse_mask(t):
@@ -87,18 +82,17 @@ def set_interps_for(time_array):
 
     #tile presented area over orbits to match time_array length
     theta_rad = np.pi/4 * np.sin(2 * np.pi * time_orbit / orbital_period)
-    A_presented_orbit = height * (np.abs(width * np.cos(theta_rad)) + np.abs(depth * np.sin(theta_rad))) #formula assumes single plane rotation
+    A_presented_orbit = height * (np.abs(width * np.cos(theta_rad)) + np.abs(depth * np.sin(theta_rad))) #formula assumes single plane rotation '''CHECK THIS'''
 
     reps = int(np.ceil(len(time_array) / len(A_presented_orbit)))
     A_presented = np.tile(A_presented_orbit, reps)[:len(time_array)] 
 
     half_angle_earth = np.arcsin(earth_radius / orbital_radius)
     A_earth_orbit = np.pi * (earth_radius**2) * (1 - np.cos(half_angle_earth))
-    A_earth = A_earth_orbit * sunlight
 
     A_pres_interp = interp1d(time_array, A_presented, kind='linear', fill_value='extrapolate')
     sunlight_interp = interp1d(time_array, sunlight, kind='nearest', fill_value='extrapolate')
-    A_earth_interp = interp1d(time_array, A_earth, kind='nearest', fill_value='extrapolate')
+    A_earth_interp = interp1d(time_array, np.full_like(time_array, A_earth_orbit), kind='nearest', fill_value='extrapolate')
 
 #thermal modelling functions
 def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
@@ -195,21 +189,27 @@ in_band_fraction = {name: np.mean((data["T"] >= threshold_low) & (data["T"] <= t
 best_name = max(in_band_fraction, key=in_band_fraction.get)
 T_best = results[best_name]["T"]
 
-#analysis of deviations from temperature band
-below = T_best[T_best < threshold_low]
-above = T_best[T_best > threshold_high]
+in_band_percent = in_band_fraction[best_name] * 100
 
-avg_below = np.mean(threshold_low - below) if len(below) > 0 else 0.0
-max_below = np.max(threshold_low - below) if len(below) > 0 else 0.0
-avg_above = np.mean(above - threshold_high) if len(above) > 0 else 0.0
-max_above = np.max(above - threshold_high) if len(above) > 0 else 0.0
+in_band_pct = {name: in_band_fraction[name] * 100 for name in results.keys()}
+
+#analysis of deviations from temperature band
+
+def deviation_stats(T):
+    below = threshold_low - T[T<threshold_low]
+    above = T[T>threshold_high]-threshold_high
+
+    return {
+        "percent_below": len(below) / len(T) * 100,
+        "avg_below": np.mean(below) if len(below) > 0 else 0.0,
+        "max_below": np.max(below) if len(below) > 0 else 0.0,
+        "percent_above": len(above) / len(T) * 100,
+        "avg_above": np.mean(above) if len(above) > 0 else 0.0,
+        "max_above": np.max(above) if len(above) > 0 else 0.0
+    }
 
 print(f"\n--- Deviation analysis for {best_name} ---")
-print(f"Time within band: {in_band_fraction[best_name]*100:.2f}%")
-print(f"Below threshold: {len(below)/len(T_best)*100:.2f}%")
-print(f"  Avg: {avg_below:.2f} K, Max: {max_below:.2f} K")
-print(f"Above threshold: {len(above)/len(T_best)*100:.2f}%")
-print(f"  Avg: {avg_above:.2f} K, Max: {max_above:.2f} K")
+print(deviation_stats(T_best))
 
 #scoring based off energy use, in-band time, heater power
 scorable = [n for n in results.keys() if n != "Bare Polished Aluminum"]
@@ -240,16 +240,28 @@ scores = {}
 for idx, name in enumerate(scorable):
     combined = (w_inband * norm_i[idx] + w_energy * norm_e[idx] + w_power * norm_p[idx])
     scores[name] = {
-        "in_band": in_band_fraction[name] * 100,
+        "in_band": in_band_pct[name],
         "energy_kWh": results[name]["energy_kWh"],
         "optimal_power_W": results[name]["optimal_power"],
         "combined_score": combined
     }
-    print(f"{name}: {in_band_fraction[name]*100:.2f}% in-band, {results[name]['energy_kWh']:.2f} kWh/year, "
+    print(f"{name}: {in_band_percent:.2f}% in-band, {results[name]['energy_kWh']:.2f} kWh/year, "
           f"{results[name]['optimal_power']:.0f} W heater → score={combined:.3f}")
 
 best_balanced = max(scores, key=lambda x: scores[x]["combined_score"]) if scores else None
 print(f"\n→ Best balanced choice: {best_balanced}")
+
+#deviation analysis for best balanced coating
+print(f"\n--- Deviation analysis for {best_balanced} ---")
+print(deviation_stats(results[best_balanced]["T"]))
+bal_stats = deviation_stats(results[best_balanced]["T"])
+percent_below_bal = bal_stats["percent_below"]
+avg_below_bal = bal_stats["avg_below"]
+max_below_bal = bal_stats["max_below"]
+percent_above_bal = bal_stats["percent_above"]
+avg_above_bal = bal_stats["avg_above"]
+max_above_bal = bal_stats["max_above"]
+
 
 #window around eclipse season for plotting
 def plot_eclipse_season():
@@ -278,7 +290,7 @@ def create_six_month_plot():
 
     for name in [best_balanced, "Bare Polished Aluminum"]:
         plt.plot(2 * time_year[:months_6_idx] / year_seconds * 6.0, results[name]["T"][:months_6_idx],
-                label=f"{name} ({in_band_fraction[name]*100:.1f}%)")
+                label=f"{name} ({in_band_pct[name]:.1f}%)")
 
     plt.axhline(threshold_low, linestyle='--', color='gray')
     plt.axhline(threshold_high, linestyle='--', color='gray')
@@ -327,31 +339,30 @@ output_data.append(['Thermal Emissivity', f"{coatings[best_balanced]['epsilon']:
 output_data.append(['Optimal Heater Power', f"{results[best_balanced]['optimal_power']:.0f}", 'W'])
 output_data.append(['Annual Energy Usage', f"{results[best_balanced]['energy_kWh']:.2f}", 'kWh'])
 output_data.append(['Time In-Band', f"{in_band_fraction[best_balanced]*100:.2f}", '%'])
-output_data.append(['Time Below Threshold', f"{len(below)/len(T_best)*100:.2f}", '%'])
-output_data.append(['Avg Deviation Below', f"{avg_below:.2f}", 'K'])
-output_data.append(['Max Deviation Below', f"{max_below:.2f}", 'K'])
-output_data.append(['Time Above Threshold', f"{len(above)/len(T_best)*100:.2f}", '%'])
-output_data.append(['Avg Deviation Above', f"{avg_above:.2f}", 'K'])
-output_data.append(['Max Deviation Above', f"{max_above:.2f}", 'K'])
+output_data.append(['Time Below Threshold', f"{percent_below_bal:.2f}", '%'])
+output_data.append(['Avg Deviation Below', f"{avg_below_bal:.2f}", 'K'])
+output_data.append(['Max Deviation Below', f"{max_below_bal:.2f}", 'K'])
+output_data.append(['Time Above Threshold', f"{percent_above_bal:.2f}", '%'])
+output_data.append(['Avg Deviation Above', f"{avg_above_bal:.2f}", 'K'])
+output_data.append(['Max Deviation Above', f"{max_above_bal:.2f}", 'K'])
 output_data.append(['', '', ''])
 
 #comparison of all coatings
 output_data.append(['ALL COATINGS COMPARISON', '', ''])
 output_data.append(['Coating', 'Alpha', 'Epsilon', 'Optimal Power (W)', 'Energy (kWh)', 'In-Band (%)'])
 for name, data in results.items():
-    in_band_pct = in_band_fraction[name] * 100
     output_data.append([
         name,
         f"{coatings[name]['alpha']:.4f}",
         f"{coatings[name]['epsilon']:.4f}",
         f"{data['optimal_power']:.0f}",
         f"{data['energy_kWh']:.2f}",
-        f"{in_band_pct:.2f}",
+        f"{in_band_pct[name]:.2f}",
     ])
 
 #export results to Excel with graphs
 print("\n--- Exporting results to Excel ---")
-timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+timestamp = datetime.now().strftime("%Y%m%d_%H%M")
 excel_file = f"satellite_analysis_{timestamp}.xlsx"
 
 #create main analysis sheet
@@ -384,13 +395,8 @@ ws_eclipse = wb.create_sheet('Eclipse Season Graph')
 ws_six = wb.create_sheet('Six Month Graph')
 
 #populate sheets with images
-xl_img_eclipse = XLImage(img_eclipse)
-xl_img_six = XLImage(img_six)
-
-ws_eclipse.add_image(xl_img_eclipse, 'A1')
-ws_six.add_image(xl_img_six, 'A1')
-
-#save workbook
+ws_eclipse.add_image(XLImage(img_eclipse), 'A1')
+ws_six.add_image(XLImage(img_six), 'A1')
 wb.save(excel_file)
 
 print(f"Saved complete analysis to: {excel_file}")
@@ -404,10 +410,9 @@ print(f"Satellite dimensions: {height}m H × {width}m W × {depth}m D, Mass: {ma
 print(f"Orbital geometry: Altitude {altitude/1e3:.0f}km, Period {orbital_period/3600:.2f}h")
 print(f"Best coating: {best_name}")
 print(f"  → Energy: {results[best_name]['energy_kWh']:.2f} kWh/year at {results[best_name]['optimal_power']:.0f}W")
-print(f"  → Performance: {in_band_fraction[best_name]*100:.2f}% in-band")
+print(f"  → Performance: {in_band_percent:.2f}% in-band")
 print(f"Best balanced: {best_balanced}")
 print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {results[best_balanced]['optimal_power']:.0f}W")
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
-
 
