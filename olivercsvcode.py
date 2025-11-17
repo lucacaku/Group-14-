@@ -508,11 +508,8 @@ ws_eclipse = wb.create_sheet('Eclipse Season Graph')
 ws_six = wb.create_sheet('Six Month Graph')
 
 #populate sheets with images
-xl_img_eclipse = XLImage(img_eclipse)
-xl_img_six = XLImage(img_six)
-
-ws_eclipse.add_image(xl_img_eclipse, 'A1')
-ws_six.add_image(xl_img_six, 'A1')
+ws_eclipse.add_image(XLImage(img_eclipse), 'A1')
+ws_six.add_image(XLImage(img_six), 'A1')
 
 #save workbook
 wb.save(excel_file)
@@ -533,5 +530,6 @@ print(f"Best balanced: {best_balanced}")
 print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {results[best_balanced]['optimal_power_W']:.0f}W")
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
+
 
 
