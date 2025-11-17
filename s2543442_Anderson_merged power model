@@ -1,0 +1,250 @@
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+
+# ================================================================
+#   LOAD THERMAL DATA FROM EXCEL
+# ================================================================
+excel_path =input('Please insert excel file here:')# r"C:\Users\aamiw\satellite_analysis_20251116_172116.xlsx"
+
+df_x = pd.read_excel(excel_path, sheet_name="Analysis", header=None)
+
+best_idx = df_x[df_x[0] == "BEST COATING"].index[0]
+
+coating_name         = df_x.iloc[best_idx + 1, 1]
+solar_absorptivity   = float(df_x.iloc[best_idx + 2, 1])
+thermal_emissivity   = float(df_x.iloc[best_idx + 3, 1])
+optimal_heater_power = float(df_x.iloc[best_idx + 4, 1])
+annual_energy_kwh    = float(df_x.iloc[best_idx + 5, 1])
+
+print("\n================ EXCEL THERMAL DATA LOADED ================")
+print(f"Best coating name:         {coating_name}")
+print(f"Solar absorptivity:        {solar_absorptivity}")
+print(f"Thermal emissivity:        {thermal_emissivity}")
+print(f"Required electrical power: {optimal_heater_power:.2f} W")
+print(f"Annual heater energy:      {annual_energy_kwh:.2f} kWh")
+print("============================================================\n")
+
+
+# ================================================================
+#   MODEL CONFIGURATION
+# ================================================================
+@dataclass
+class ModelConfig:
+    start_year: int = 2025
+    years: int = 10
+    eclipse_halfwidth_days: float = 22.5
+    eclipse_peak_minutes: float = 70.0
+    decl_amp_deg: float = 23.44
+    decl_phase_shift_day: int = 80
+    ecc_amp: float = 0.033
+    ecc_perihelion_shift_day: int = 3
+    optical_drop_year1: float = 0.07
+    cell_drop_year1: float = 0.03
+    cell_drop_each_later_year: float = 0.02
+
+
+# ================================================================
+#   HELPER FUNCTIONS
+# ================================================================
+def to_doy(d: datetime) -> int:
+    return (d - datetime(d.year, 1, 1)).days + 1
+
+
+def solar_distance_eff(n, amp=0.033, shift=3):
+    return 1.0 + amp * np.cos(2*np.pi * (n - shift) / 365.0)
+
+
+def solar_angle_eff(n, decl_amp_deg=23.44, phase_shift=80):
+    delta = decl_amp_deg * np.sin(2*np.pi*(n - phase_shift)/365.0)
+    return np.cos(np.deg2rad(delta))
+
+
+def eclipse_eff(n, centers=(80, 263), halfwidth=22.5, max_minutes=70.0):
+    n = np.asarray(n, dtype=float)
+    eclipse_minutes = np.zeros_like(n, dtype=float)
+
+    for c in centers:
+        d = np.abs(((n - c + 182.5) % 365) - 182.5)
+        w = np.where(d <= halfwidth, 0.5*(1 + np.cos(np.pi * d / halfwidth)), 0.0)
+        eclipse_minutes += max_minutes * w
+
+    return 1.0 - eclipse_minutes / (24.0 * 60.0)
+
+
+def degradation_eff(day_index, optical1=0.07, cell1=0.03, cell_later=0.02):
+    year = day_index // 365
+    optical = np.where(year == 0, 1.0, 1.0 - optical1)
+    cells = (1.0 - cell1) * np.power((1.0 - cell_later), year)
+    return optical * cells
+
+
+# ================================================================
+#   NUMERICAL METHODS
+# ================================================================
+# 1. Linear interpolation (wrapper)
+def linear_interp(x, xp, fp):
+    return np.interp(x, xp, fp)
+
+
+# 2. Linear regression
+def linear_regression(x, y):
+    coeffs = np.polyfit(x, y, 1)   # slope + intercept
+    slope, intercept = coeffs
+    return slope, intercept
+
+
+# 3. Bisection (unchanged; expects a bracketed root)
+def bisection(func, a, b, tol=1e-6, max_iter=200):
+    fa = func(a)
+    fb = func(b)
+    if fa * fb > 0:
+        raise ValueError("Root not bracketed")
+
+    for _ in range(max_iter):
+        mid = 0.5 * (a + b)
+        fm = func(mid)
+
+        if abs(fm) < tol:
+            return mid
+
+        if fa * fm < 0:
+            b = mid
+            fb = fm
+        else:
+            a = mid
+            fa = fm
+
+    return 0.5 * (a + b)
+
+
+# ================================================================
+#   BUILD 10-YEAR EFFICIENCY MODEL
+# ================================================================
+def build_timeseries(cfg: ModelConfig):
+    start = datetime(cfg.start_year, 1, 1)
+    total_days = cfg.years * 365
+
+    dates = [start + timedelta(days=i) for i in range(total_days)]
+    doy = np.array([to_doy(d) for d in dates])
+    d_idx = np.arange(total_days)
+
+    dist = solar_distance_eff(doy, cfg.ecc_amp, cfg.ecc_perihelion_shift_day)
+    angle = solar_angle_eff(doy, cfg.decl_amp_deg, cfg.decl_phase_shift_day)
+    ecl = eclipse_eff(doy, (80, 263), cfg.eclipse_halfwidth_days, cfg.eclipse_peak_minutes)
+    deg = degradation_eff(d_idx, cfg.optical_drop_year1, cfg.cell_drop_year1, cfg.cell_drop_each_later_year)
+
+    total = np.clip(dist * angle * ecl * deg, 0, 1.2)
+
+    return pd.DataFrame({
+        "date": dates,
+        "day_of_year": doy,
+        "total_eff": total,
+        "days": d_idx
+    }).set_index("date")
+
+
+# ================================================================
+#   PANEL AREA WITH ROBUST AUTO-BRACKETING ROOT FINDING
+# ================================================================
+def required_panel_area(power_required, df_eff, absorptivity, solar_flux):
+    """
+    Finds the minimum panel area such that min_t (eff(t) * absorptivity * solar_flux * area) >= power_required.
+    Uses auto-bracketing to ensure bisection has a sign change.
+    """
+
+    absorbed_per_m2 = absorptivity * solar_flux
+    eff = df_eff["total_eff"].values
+
+    # function to find root for: min(power_generated over time) - power_required
+    def f(area):
+        power = eff * absorbed_per_m2 * area
+        return np.min(power) - power_required
+
+    # Start with a tiny area a and expand b until f(b) >= 0 (i.e., area big enough)
+    a = 1e-6
+    fa = f(a)
+
+    b = 0.1  # initial upper guess (m^2)
+    fb = f(b)
+
+    # Expand until fb >= 0 or we hit a safety limit
+    max_area_limit = 1e6  # 1 million m^2 safety cap
+    while fb < 0 and b <= max_area_limit:
+        b *= 2.0
+        fb = f(b)
+
+    if fb < 0:
+        # Even enormous area isn't sufficient — very likely bad inputs
+        raise RuntimeError(
+            "Unable to bracket root: panel area up to {:.0f} m^2 still insufficient to meet power requirement. "
+            "Check your inputs (power_required, absorptivity, efficiency model, solar_flux).".format(max_area_limit)
+        )
+
+    # Now bisection is safe
+    area_solution = bisection(f, a, b, tol=1e-6, max_iter=200)
+
+    print("\n================ SOLAR PANEL AREA (ROOT FINDING) ================")
+    print(f"Power required:        {power_required:.2f} W")
+    print(f"Absorptivity:          {absorptivity}")
+    print(f"Solar flux:            {solar_flux} W/m²")
+    print(f"Required panel area:   {area_solution:.3f} m²")
+    print("=================================================================\n")
+
+    return area_solution, absorbed_per_m2
+
+
+# ================================================================
+#   MAIN
+# ================================================================
+def main():
+
+    cfg = ModelConfig()
+    df_eff = build_timeseries(cfg)
+
+    power_required = optimal_heater_power
+    solar_flux = 1361
+    absorptivity = solar_absorptivity
+
+    # Compute required area using robust root finding with auto-bracketing
+    area, absorbed_per_m2 = required_panel_area(
+        power_required, df_eff, absorptivity, solar_flux)
+
+    # ------------------------------------------------------------
+    #   Linear regression of degradation trend over 10 years
+    # ------------------------------------------------------------
+    slope, intercept = linear_regression(
+        df_eff["days"].values, df_eff["total_eff"].values
+    )
+    print(f"Efficiency trend slope: {slope:.6e} per day")
+
+    # Demonstrate linear interpolation (example): interpolate mid-point of first day
+    xp = df_eff["days"].values
+    fp = df_eff["total_eff"].values
+    x_query = 0.5  # half day after start (indexing in days)
+    interp_val = linear_interp(x_query, xp, fp)
+    print(f"Example interpolation: efficiency at day index {x_query} ≈ {interp_val:.6f}")
+
+    # ------------------------------------------------------------
+    #   Plot power output
+    # ------------------------------------------------------------
+    power_generated = df_eff["total_eff"].values * absorbed_per_m2 * area
+
+    plt.figure(figsize=(14, 6))
+    plt.plot(df_eff.index, power_generated, label="Power Generated (W)")
+    plt.axhline(power_required, color='r', linestyle='--', label="Required Power")
+
+    plt.title("Power Generated Over 10 Years (Panel Area via Root Finding)")
+    plt.xlabel("Year")
+    plt.ylabel("Power (W)")
+    plt.grid(True)
+    plt.legend()
+    plt.tight_layout()
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()
