@@ -1,0 +1,308 @@
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from openpyxl import load_workbook
+import glob
+import os
+import matplotlib.pyplot as plt
+
+A_max = 1
+A_min = 0
+
+# Angle array
+theta_deg = np.linspace(0, 360, 1000)
+time = theta_deg / 15  # convert angle → hours
+
+# === Worst Day Eclipse (GEO) ===
+eclipse_duration_h = 1.18        # 70.8 minutes
+eclipse_center_h = 12.0          # midnight = GEO eclipse center
+
+eclipse_half_angle = (eclipse_duration_h / 24 * 360) / 2
+theta_eclipse_start = 180 - eclipse_half_angle
+theta_eclipse_end   = 180 + eclipse_half_angle
+
+# Convert eclipse window to time
+t_eclipse_start = theta_eclipse_start / 15
+t_eclipse_end   = theta_eclipse_end / 15
+
+# === Create Sunlight Mask (1 in sun, 0 in eclipse) ===
+sunlight_mask = np.where(
+    (theta_deg >= theta_eclipse_start) & (theta_deg <= theta_eclipse_end),
+    0,
+    1
+)
+
+# === Area function with eclipse applied ===
+def area(theta_deg):
+    theta_rad = np.deg2rad(theta_deg)
+    A = (A_max - A_min) * np.abs(np.cos(theta_rad)) + A_min
+    return A * sunlight_mask    # <-- zero area during eclipse
+
+
+# CONFIG MODEL
+
+@dataclass
+class ModelConfig:
+    start_year: int = 2025
+    years: int = 10
+    eclipse_halfwidth_days: float = 22.5
+    eclipse_peak_minutes: float = 70.0
+    decl_amp_deg: float = 23.44
+    decl_phase_shift_day: int = 80
+    ecc_amp: float = 0.033
+    ecc_perihelion_shift_day: int = 3
+    optical_drop_year1: float = 0.07
+    cell_drop_year1: float = 0.03
+    cell_drop_each_later_year: float = 0.02
+
+
+# HELPER FUNCTIONS
+
+def to_doy(date):
+    return np.array([(d - datetime(d.year, 1, 1)).days + 1 for d in date])
+
+def solar_distance_eff(n, amp, shift):
+    return 1.0 + amp * np.cos(2*np.pi * (n - shift) / 365.0)
+
+def solar_angle_eff(n, amp, shift):
+    delta = amp * np.sin(2*np.pi * (n - shift) / 365.0)
+    return np.cos(np.deg2rad(delta))
+
+def eclipse_eff(n, centers, halfwidth, max_minutes):
+    n = np.asarray(n)
+    effect = np.zeros_like(n, dtype=float)
+
+    for c in centers:
+        d = np.abs(((n - c + 182.5) % 365) - 182.5)
+        w = 0.5 * (1 + np.cos(np.pi * d / halfwidth))
+        w[d > halfwidth] = 0
+        effect += w * max_minutes
+
+    return 1.0 - effect / (24 * 60)
+
+def degradation_eff(days, optical1, cell1, cell_later):
+    year = days // 365
+    optical = np.where(year == 0, 1.0, 1.0 - optical1)
+    cells = (1 - cell1) * np.power((1 - cell_later), year)
+    return optical * cells
+
+
+# EXCEL LOADING
+
+def load_excel_values(path):
+    df = pd.read_excel(path, sheet_name="Analysis", header=None)
+    idx = df[df[0] == "BEST COATING"].index[0]
+
+    return {
+        "name": df.iloc[idx + 1, 1],
+        "absorptivity": float(df.iloc[idx + 2, 1]),
+        "emissivity": float(df.iloc[idx + 3, 1]),
+        "heater_power": float(df.iloc[idx + 4, 1]),
+        "annual_kwh": float(df.iloc[idx + 5, 1]),
+        "energy_worst_day": float(df.iloc[idx + 6, 1])
+    }
+
+
+# BUILD TIMESERIES WITH INTERPOLATION + REGRESSION
+
+def build_efficiency(cfg):
+    total_days = cfg.years * 365
+
+    dates = np.array([datetime(cfg.start_year, 1, 1) + timedelta(days=i)
+                      for i in range(total_days)])
+
+    doy = to_doy(dates)
+    idx = np.arange(total_days)
+
+    dist = solar_distance_eff(doy, cfg.ecc_amp, cfg.ecc_perihelion_shift_day)
+    angle = solar_angle_eff(doy, cfg.decl_amp_deg, cfg.decl_phase_shift_day)
+    ecl = eclipse_eff(doy, [80, 263], cfg.eclipse_halfwidth_days, cfg.eclipse_peak_minutes)
+    deg = degradation_eff(idx, cfg.optical_drop_year1, cfg.cell_drop_year1, cfg.cell_drop_each_later_year)
+
+    total_eff = np.clip(dist * angle * ecl * deg, 0, 1.2)
+
+    df = pd.DataFrame({"date": dates, "total_eff": total_eff}).set_index("date")
+
+    
+    # 1) LINEAR INTERPOLATION
+    
+    # (Your data is already daily, but interpolation makes the model robust.)
+    df["total_eff_interp"] = df["total_eff"].interpolate(method="linear")
+
+    
+    # 2) LINEAR REGRESSION (efficiency vs mission day index)
+    
+    slope, intercept = np.polyfit(idx, total_eff, 1)
+    trend = slope * idx + intercept
+
+    df["eff_trendline"] = trend
+
+    return df
+
+
+
+# PANEL AREA (USING USABLE POWER = +10%)
+
+
+internal_energy_use = 0000 # W
+
+I_sun = 1361.0               # W/m²
+absobtivity = 0.86            # solar cell absorptivity
+eta_panel = 0.40             # solar cell efficiency
+eta_sys = 0.679               # system efficiency
+eta_total = eta_panel * eta_sys   # effective conversion efficiency
+
+def surface_area(energy_heater):
+
+    energy_J =  (energy_heater) + (internal_energy_use * 86400)  # J needed per day
+
+    power_per_m2 = I_sun * absobtivity * eta_total * area(theta_deg)   
+
+    # integrate over full day
+    dt = 86400 / len(power_per_m2)
+    energy_per_m2_day = np.sum(power_per_m2) * dt     # J per m² per day
+
+    area_required = energy_J / energy_per_m2_day
+
+    # 10% margin
+    area_required_10 = area_required * 1.10
+
+    print(energy_heater)
+
+    return area_required_10
+
+
+
+
+# POWER TIMESERIES
+
+def power_timeseries(df_eff, area, absorbed_per_m2):
+    df_eff["power_generated"] = area * absorbed_per_m2 * df_eff["total_eff"]
+    return df_eff
+
+
+# MAIN
+
+def main():
+    # Look for Excel file in parent directory
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
+    excel_files = glob.glob(excel_pattern)
+    
+    if not excel_files:
+        raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
+    
+    excel_path = max(excel_files, key=os.path.getctime)
+    vals = load_excel_values(excel_path)
+    energy_worst_day = vals["energy_worst_day"]
+
+
+    cfg = ModelConfig()
+    df_eff = build_efficiency(cfg)
+
+    area, absorbed = surface_area(energy_worst_day), I_sun * vals["absorptivity"]
+    
+
+    df = power_timeseries(df_eff, area, absorbed)
+    return df, area, energy_worst_day
+
+
+if __name__ == "__main__":
+    df_out, panel_area, energy_worst_day = main()
+
+    # WRITE PANEL AREA BACK TO EXCEL
+    
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
+    excel_files = glob.glob(excel_pattern)
+    
+    if not excel_files:
+        raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
+    
+    excel_path = max(excel_files, key=os.path.getctime)
+
+    wb = load_workbook(excel_path)
+    ws = wb["Analysis"]
+
+    best_idx = None
+    for row in ws.iter_rows():
+        if row[0].value == "BEST COATING":
+            best_idx = row[0].row
+            break
+
+    if best_idx is None:
+        raise ValueError("Could not find 'BEST COATING' in column A.")
+
+    write_row = best_idx + 6
+
+    ws[f"A{write_row}"] = "Required Panel Area (m²)"
+    ws[f"B{write_row}"] = float(panel_area)
+
+    wb.save(excel_path)
+
+    print(f"Panel area written successfully at row {write_row}: {panel_area:.4f} m²")
+
+
+
+
+#percentage = ((energy_heater + internal_energy_use) / (I_sun * eta_total * surface_area(energy_worst_day)))
+
+percentage = 10/100
+
+
+A_values = area(theta_deg)
+mask = A_values < percentage * A_max
+indices = np.where(mask)[0]
+
+intervals = []
+if len(indices) > 0:
+    start = indices[0]
+    for i in range(1, len(indices)):
+        if indices[i] != indices[i - 1] + 1:
+            end = indices[i - 1]
+            intervals.append((time[start], time[end]))
+            start = indices[i]
+    intervals.append((time[start], time[indices[-1]]))
+
+print("Intervals when battery is needed:")
+for (t1, t2) in intervals:
+    print(f"From {t1:.2f} h to {t2:.2f} h")
+
+
+
+plt.figure(figsize=(10, 5))
+plt.plot(theta_deg, area(theta_deg), lw=2, label="Visible Solar Area")
+
+# Shade eclipse
+plt.axvspan(theta_eclipse_start, theta_eclipse_end, color='gray', alpha=0.3,
+            label="Eclipse (Area=0)")
+
+plt.title('Visible Solar Panel Area vs Orbital Angle')
+plt.xlabel('Orbital angle, θ (degrees)')
+plt.ylabel('Visible surface area, A (%)')
+plt.xlim(0, 360)
+plt.ylim(0, A_max * 1.05)
+plt.axhline(percentage, color='r', linestyle='--', label="Required Power")
+plt.grid(alpha=0.3)
+plt.legend()
+plt.show()
+
+
+plt.figure(figsize=(10, 5))
+plt.plot(time, area(theta_deg), lw=2, label="Visible Solar Area")
+
+# Shade eclipse
+plt.axvspan(t_eclipse_start, t_eclipse_end, color='gray', alpha=0.3,
+            label="Eclipse (Area=0)")
+
+plt.title('Visible Solar Panel Area vs Time')
+plt.xlabel('Time, t (Hours)')
+plt.ylabel('Visible surface area, A (%)')
+plt.axhline(percentage, color='r', linestyle='--', label="Required Power")
+plt.xlim(0, 24)
+plt.ylim(0, A_max * 1.05)
+plt.grid(alpha=0.3)
+plt.legend()
+plt.show()
+
