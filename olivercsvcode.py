@@ -108,7 +108,7 @@ def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
     A_earth_local = float(A_earth_interp(t))
 
     Q_solar = alpha * solar_constant * is_sunlit * A_pres
-    Q_albedo = width * height * solar_constant * alpha * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2))
+    Q_albedo = width * height * solar_constant * alpha * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2)) #assumes reflected sun is uniform hemisphere
     Q_ir_loss = epsilon * sigma * (T**4) * A_pres
 
     if T < average_threshold: #heater turns on at low threshold, off at high threshold
@@ -152,7 +152,7 @@ def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_ini
 set_interps_for(time_sweep)
 
 #heater power sweep to find optimal power for each coating
-heater_powers = np.arange(0000, 25000, 200) # tests 0-15 kW in 200 W increments
+heater_powers = np.arange(0000, 15000, 200) # tests 0-15 kW in 200 W increments
 results = {}
 
 
@@ -219,6 +219,10 @@ for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
     results[name]["heater_powers"] = heater_powers
     results[name]["energy_vs_power"] = energy_vs_power
 
+
+print("clean try")
+
+
 for name in results:
     hp = np.array(results[name]["heater_powers"])
     evp = np.array(results[name]["energy_vs_power"])
@@ -268,23 +272,27 @@ min_power_2 = get_optimal("Ta2O5, SiN, SiO2 Film")
 min_power_3 = get_optimal("Hughson White Paint A276")
 min_power_4 = get_optimal("Bare Polished Aluminum")
 
-print("Code still running!")
+
+plt.figure(figsize=(12, 6))
 
 for name, data in results.items():
     if name != "Bare Polished Aluminum":
         plt.figure(figsize=(12,5))
+    
+    hp = np.array(data["heater_powers"]) / 1000    # kW
+    evp = np.array(data["energy_vs_power"])        # kWh
 
-        plt.plot(data["heater_powers"]/1000, data["energy_vs_power"], 'o-', label="Heater Energy")
-        plt.xlabel("Heater Power (kW)")
-        plt.ylabel("Total Energy Used (kWh)")
-        plt.title(f"{name} – Heater Energy vs Power")
-        plt.grid(True)
-        plt.tight_layout()
-        plt.legend()
+    plt.plot(hp, evp, 'o-', label=name)
 
+plt.xlabel("Heater Power (kW)")
+plt.ylabel("Total Energy Used (kWh)")
+plt.title("Heater Energy vs Heater Power for All Coatings")
+plt.grid(True)
+plt.legend()
+plt.tight_layout()
 plt.show()
 
-# Update coatings with optimal power values
+
 coatings['Zerlauts S-13G White Paint']['power'] = min_power_1
 coatings['Ta2O5, SiN, SiO2 Film']['power'] = min_power_2
 coatings['Hughson White Paint A276']['power'] = min_power_3
@@ -525,7 +533,4 @@ print(f"Best balanced: {best_balanced}")
 print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {results[best_balanced]['optimal_power_W']:.0f}W")
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
-
-
-
 
