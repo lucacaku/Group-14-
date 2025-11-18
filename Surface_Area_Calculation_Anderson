@@ -2,6 +2,9 @@ import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from openpyxl import load_workbook
+import glob
+import os
 
 # CONFIG MODEL
 
@@ -138,7 +141,15 @@ def power_timeseries(df_eff, area, absorbed_per_m2):
 # MAIN
 
 def main():
-    excel_path = r"C:\Users\aamiw\satellite_analysis_20251116_172116.xlsx"
+    # Look for Excel file in parent directory
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
+    excel_files = glob.glob(excel_pattern)
+    
+    if not excel_files:
+        raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
+    
+    excel_path = max(excel_files, key=os.path.getctime)
     vals = load_excel_values(excel_path)
 
     cfg = ModelConfig()
@@ -158,32 +169,34 @@ def main():
 if __name__ == "__main__":
     df_out, panel_area = main()
 
+    # WRITE PANEL AREA BACK TO EXCEL
+    
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
+    excel_files = glob.glob(excel_pattern)
+    
+    if not excel_files:
+        raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
+    
+    excel_path = max(excel_files, key=os.path.getctime)
 
+    wb = load_workbook(excel_path)
+    ws = wb["Analysis"]
 
-# WRITE PANEL AREA BACK TO EXCEL
+    best_idx = None
+    for row in ws.iter_rows():
+        if row[0].value == "BEST COATING":
+            best_idx = row[0].row
+            break
 
+    if best_idx is None:
+        raise ValueError("Could not find 'BEST COATING' in column A.")
 
-from openpyxl import load_workbook
+    write_row = best_idx + 6
 
-excel_path = r"C:\Users\aamiw\satellite_analysis_20251116_172116.xlsx"
+    ws[f"A{write_row}"] = "Required Panel Area (m²)"
+    ws[f"B{write_row}"] = float(panel_area)
 
-wb = load_workbook(excel_path)
-ws = wb["Analysis"]
+    wb.save(excel_path)
 
-best_idx = None
-for row in ws.iter_rows():
-    if row[0].value == "BEST COATING":
-        best_idx = row[0].row
-        break
-
-if best_idx is None:
-    raise ValueError("Could not find 'BEST COATING' in column A.")
-
-write_row = best_idx + 6
-
-ws[f"A{write_row}"] = "Required Panel Area (m²)"
-ws[f"B{write_row}"] = float(panel_area)
-
-wb.save(excel_path)
-
-print(f"Panel area written successfully at row {write_row}: {panel_area:.4f} m²")
+    print(f"Panel area written successfully at row {write_row}: {panel_area:.4f} m²")
