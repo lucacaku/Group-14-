@@ -5,6 +5,7 @@ from scipy.interpolate import interp1d
 import pandas as pd
 from datetime import datetime
 import io
+from tqdm import tqdm
 
 #define constants and parameters
 sigma = 5.67e-8
@@ -41,7 +42,7 @@ print("Our code takes a moment to run, bear with us!")
 
 #initialise coating properties array
 coatings = {
-    'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93},
+    'Zerlauts S-13G White Paint': {'alpha': 0.2, 'epsilon': 0.9},
     'Ta2O5, SiN, SiO2 Film': {'alpha': 0.110, 'epsilon': 0.750},
     'Hughson White Paint A276': {'alpha': 0.26, 'epsilon': 0.88},
     'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04}, #establish baseline coating
@@ -57,17 +58,13 @@ orbital_period = 2 * np.pi * np.sqrt(orbital_radius**3 / (Gravitational_constant
 
 dt = 10 * 60 #small timestep so accurate, not too small to be slow
 day_start = 0
-sim_days = 365
-simulation_end = (day_start + sim_days) * 24 * 3600
+simulation_end = 365 * 24 * 3600
 
 time_orbit = np.linspace(0, orbital_period, 1000)
 time_year = np.linspace(0, year_seconds, int(year_seconds / dt))
 
-time_sweep_start = simulation_start
 time_sweep_days = 3
-time_sweep = np.arange(time_sweep_start, time_sweep_start + time_sweep_days * 24 * 3600 + dt, dt)
-
-time_long_start = day_start
+time_sweep = np.arange(79*24*3600, (79 + time_sweep_days) * 24 * 3600, dt) 
 
 #eclipse and area functions
 def eclipse_mask(t):
@@ -111,7 +108,7 @@ def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
     A_earth_local = float(A_earth_interp(t))
 
     Q_solar = alpha * solar_constant * is_sunlit * A_pres
-    Q_albedo = solar_constant * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2)) #assumes reflected sun is uniform hemisphere
+    Q_albedo = width * height * solar_constant * alpha * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2))
     Q_ir_loss = epsilon * sigma * (T**4) * A_pres
 
     if T < average_threshold: #heater turns on at low threshold, off at high threshold
@@ -155,11 +152,11 @@ def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_ini
 set_interps_for(time_sweep)
 
 #heater power sweep to find optimal power for each coating
-heater_powers = np.arange(0000, 15000, 200) # tests 0-15 kW in 200 W increments
+heater_powers = np.arange(0000, 25000, 200) # tests 0-15 kW in 200 W increments
 results = {}
 
 
-for name, props in coatings.items():
+for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
     alpha = props['alpha']
     epsilon = props['epsilon']
 
@@ -266,34 +263,32 @@ def get_optimal(name):
         return 0
     return entry.get("optimal_power_W", 0)
 
-min_power_1 = get_optimal("Polymide Nanofiber Films")
+min_power_1 = get_optimal("Zerlauts S-13G White Paint")
 min_power_2 = get_optimal("Ta2O5, SiN, SiO2 Film")
 min_power_3 = get_optimal("Hughson White Paint A276")
 min_power_4 = get_optimal("Bare Polished Aluminum")
 
-for name, data in results.items():
-    plt.figure(figsize=(12,5))
+print("Code still running!")
 
-    plt.plot(data["heater_powers"]/1000, data["energy_vs_power"], 'o-', label="Heater Energy")
-    plt.xlabel("Heater Power (kW)")
-    plt.ylabel("Total Energy Used (kWh)")
-    plt.title(f"{name} – Heater Energy vs Power")
-    plt.grid(True)
-    plt.tight_layout()
-    plt.legend()
+for name, data in results.items():
+    if name != "Bare Polished Aluminum":
+        plt.figure(figsize=(12,5))
+
+        plt.plot(data["heater_powers"]/1000, data["energy_vs_power"], 'o-', label="Heater Energy")
+        plt.xlabel("Heater Power (kW)")
+        plt.ylabel("Total Energy Used (kWh)")
+        plt.title(f"{name} – Heater Energy vs Power")
+        plt.grid(True)
+        plt.tight_layout()
+        plt.legend()
 
 plt.show()
 
-print("Our code is still running!")
-
-
-#is there any way to remove this? to just append to our old array?
-coatings = {
-    'Polymide Nanofiber Films': {'alpha': 0.004, 'epsilon': 0.93, 'power': min_power_1},
-    'Ta2O5, SiN, SiO2 Film': {'alpha': 0.110, 'epsilon': 0.750, 'power': min_power_2},
-    'Hughson White Paint A276': {'alpha': 0.26, 'epsilon': 0.88, 'power': min_power_3},
-    'Bare Polished Aluminum': {'alpha': 0.4, 'epsilon': 0.04, 'power': min_power_4}
-}
+# Update coatings with optimal power values
+coatings['Zerlauts S-13G White Paint']['power'] = min_power_1
+coatings['Ta2O5, SiN, SiO2 Film']['power'] = min_power_2
+coatings['Hughson White Paint A276']['power'] = min_power_3
+coatings['Bare Polished Aluminum']['power'] = min_power_4
 
 #full year simulation with optimal heater powers
 set_interps_for(time_year)
@@ -530,6 +525,7 @@ print(f"Best balanced: {best_balanced}")
 print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {results[best_balanced]['optimal_power_W']:.0f}W")
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
+
 
 
 
