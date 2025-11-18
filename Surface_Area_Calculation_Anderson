@@ -61,15 +61,12 @@ def load_excel_values(path):
     idx = df[df[0] == "BEST COATING"].index[0]
 
     return {
-        "name": df.iloc[idx + 1, 1],
-        "absorptivity": float(df.iloc[idx + 2, 1]),
-        "emissivity": float(df.iloc[idx + 3, 1]),
         "heater_power": float(df.iloc[idx + 4, 1]),
         "annual_kwh": float(df.iloc[idx + 5, 1])
     }
 
 
-# BUILD TIMESERIES WITH INTERPOLATION + REGRESSION
+# BUILD TIMESERIES
 
 def build_efficiency(cfg):
     total_days = cfg.years * 365
@@ -89,27 +86,20 @@ def build_efficiency(cfg):
 
     df = pd.DataFrame({"date": dates, "total_eff": total_eff}).set_index("date")
 
-    
-    # 1) LINEAR INTERPOLATION
-    
-    # (Your data is already daily, but interpolation makes the model robust.)
     df["total_eff_interp"] = df["total_eff"].interpolate(method="linear")
 
-    
-    # 2) LINEAR REGRESSION (efficiency vs mission day index)
-    
     slope, intercept = np.polyfit(idx, total_eff, 1)
     trend = slope * idx + intercept
-
     df["eff_trendline"] = trend
 
     return df
 
 
-# PANEL AREA (USING USABLE POWER = +10%)
+# PANEL AREA (USABLE POWER = heater × 1.10, absorptivity fixed to 0.86)
 
-def compute_panel_area(heater_power, df_eff, absorptivity, solar_flux):
-    usable_power = heater_power * 1.10
+def compute_panel_area(heater_power, df_eff, solar_flux):
+    absorptivity = 0.86
+    usable_power = heater_power + (10000) * 1.10
     absorbed_per_m2 = absorptivity * solar_flux
 
     eff = df_eff["total_eff"].values
@@ -120,83 +110,63 @@ def compute_panel_area(heater_power, df_eff, absorptivity, solar_flux):
 
     worst_area = area_needed[worst_idx]
     worst_eff = eff[worst_idx]
-    worst_date = df_eff.index[worst_idx]
+    worst_year = df_eff.index[worst_idx].year
 
     print("----- PANEL AREA RESULTS -----")
-    print(f"Usable power (10% eclipse margin): {usable_power:.2f} W")
-    print(f"Worst-case date:                  {worst_date.date()}")
-    print(f"Worst-case efficiency:            {worst_eff:.6f}")
-    print(f"Required panel area:              {worst_area:.4f} m²")
+    print(f"Usable power (10% margin):       {usable_power:.2f} W")
+    print(f"Worst-case year:                 {worst_year}")
+    print(f"Worst efficiency:                {worst_eff:.6f}")
+    print(f"Required panel area:             {worst_area:.4f} m²")
 
-    return worst_area, absorbed_per_m2
-
-
-# POWER TIMESERIES
-
-def power_timeseries(df_eff, area, absorbed_per_m2):
-    df_eff["power_generated"] = area * absorbed_per_m2 * df_eff["total_eff"]
-    return df_eff
+    return worst_area, worst_eff, worst_year, usable_power, absorbed_per_m2
 
 
 # MAIN
 
 def main():
-    # Look for Excel file in parent directory
     parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
     excel_files = glob.glob(excel_pattern)
-    
+
     if not excel_files:
         raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
-    
+
     excel_path = max(excel_files, key=os.path.getctime)
     vals = load_excel_values(excel_path)
 
     cfg = ModelConfig()
     df_eff = build_efficiency(cfg)
 
-    area, absorbed = compute_panel_area(
+    area, worst_eff, worst_year, usable_power, absorbed = compute_panel_area(
         vals["heater_power"],
         df_eff,
-        vals["absorptivity"],
         1361
     )
 
-    df = power_timeseries(df_eff, area, absorbed)
-    return df, area
+    return df_eff, area, worst_eff, worst_year, usable_power, excel_path
 
 
 if __name__ == "__main__":
-    df_out, panel_area = main()
-
-    # WRITE PANEL AREA BACK TO EXCEL
-    
-    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
-    excel_files = glob.glob(excel_pattern)
-    
-    if not excel_files:
-        raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
-    
-    excel_path = max(excel_files, key=os.path.getctime)
+    df_out, panel_area, worst_eff, worst_year, usable_power, excel_path = main()
 
     wb = load_workbook(excel_path)
     ws = wb["Analysis"]
 
-    best_idx = None
-    for row in ws.iter_rows():
-        if row[0].value == "BEST COATING":
-            best_idx = row[0].row
-            break
+    write_row = 43  # fixed row
 
-    if best_idx is None:
-        raise ValueError("Could not find 'BEST COATING' in column A.")
+    ws[f"A{write_row}"] = "Worst Efficiency"
+    ws[f"B{write_row}"] = float(worst_eff)
 
-    write_row = best_idx + 6
+    ws[f"A{write_row+1}"] = "Worst Year"
+    ws[f"B{write_row+1}"] = int(worst_year)
 
-    ws[f"A{write_row}"] = "Required Panel Area (m²)"
-    ws[f"B{write_row}"] = float(panel_area)
+    ws[f"A{write_row+2}"] = "Required Panel Area (m²)"
+    ws[f"B{write_row+2}"] = float(panel_area)
+
+    ws[f"A{write_row+3}"] = "Usable Power (W)"
+    ws[f"B{write_row+3}"] = float(usable_power)
 
     wb.save(excel_path)
 
-    print(f"Panel area written successfully at row {write_row}: {panel_area:.4f} m²")
+    print(f"Results written successfully at rows {write_row}–{write_row+3}.")
+
