@@ -1,0 +1,215 @@
+# -*- coding: utf-8 -*-
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from sklearn.linear_model import LinearRegression
+
+
+# Configuration
+@dataclass
+class ModelConfig:
+    start_year: int = 2025
+    years: int = 10
+    eclipse_halfwidth_days: float = 22.5
+    eclipse_peak_minutes: float = 70.0
+    decl_amp_deg: float = 23.44
+    decl_phase_shift_day: int = 80
+    ecc_amp: float = 0.033
+    ecc_perihelion_shift_day: int = 3
+    optical_drop_year1: float = 0.07
+    cell_drop_year1: float = 0.03
+    cell_drop_each_later_year: float = 0.02
+    out_prefix: str = "geo_total_efficiency"
+
+
+# Helper functions
+def to_doy(d: datetime) -> int:
+    return (d - datetime(d.year, 1, 1)).days + 1
+
+
+def solar_distance_eff(n, amp=0.033, shift=3):
+    n = np.asarray(n, dtype=float)
+    return 1.0 + amp * np.cos(2 * np.pi * (n - shift) / 365.0)
+
+
+def solar_angle_eff(n, decl_amp_deg=23.44, phase_shift=80):
+    n = np.asarray(n, dtype=float)
+    delta_deg = decl_amp_deg * np.sin(2 * np.pi * (n - phase_shift) / 365.0)
+    return np.cos(np.deg2rad(delta_deg))
+
+
+def eclipse_eff(n, centers=(80, 263), halfwidth=22.5, max_minutes=70.0):
+    n = np.asarray(n, dtype=float)
+    eclipse_minutes = np.zeros_like(n, dtype=float)
+    for c in centers:
+        d = np.abs(((n - c + 182.5) % 365) - 182.5)
+        w = np.where(d <= halfwidth, 0.5 * (1 + np.cos(np.pi * d / halfwidth)), 0.0)
+        eclipse_minutes += max_minutes * w
+    return 1.0 - eclipse_minutes / (24.0 * 60.0)
+
+
+def degradation_eff(day_index,
+                    optical_drop_year1=0.07,
+                    cell_drop_year1=0.03,
+                    cell_drop_each_later_year=0.02):
+    day_index = np.asarray(day_index, dtype=int)
+    year_num = day_index // 365
+    optical = np.where(year_num == 0, 1.0, 1.0 - optical_drop_year1)
+    cells = (1.0 - cell_drop_year1) * np.power((1.0 - cell_drop_each_later_year), year_num)
+    return optical * cells
+
+
+# Core model
+def build_timeseries(cfg: ModelConfig) -> pd.DataFrame:
+    start_date = datetime(cfg.start_year, 1, 1)
+    total_days = cfg.years * 365
+
+    dates = [start_date + timedelta(days=i) for i in range(total_days)]
+    doy = np.array([((to_doy(d) - 1) % 365) + 1 for d in dates])
+    day_idx = np.arange(total_days)
+
+    dist = solar_distance_eff(doy, cfg.ecc_amp, cfg.ecc_perihelion_shift_day)
+    angle = solar_angle_eff(doy, cfg.decl_amp_deg, cfg.decl_phase_shift_day)
+    ecl = eclipse_eff(doy, (80, 263), cfg.eclipse_halfwidth_days, cfg.eclipse_peak_minutes)
+    deg = degradation_eff(day_idx, cfg.optical_drop_year1,
+                          cfg.cell_drop_year1, cfg.cell_drop_each_later_year)
+
+    total = dist * angle * ecl * deg
+    total = np.clip(total, 0.0, 1.2)
+
+    df = pd.DataFrame({
+        "date": dates,
+        "day_of_year": doy,
+        "distance_eff": dist,
+        "angle_eff": angle,
+        "eclipse_eff": ecl,
+        "degradation_eff": deg,
+        "total_eff": total
+    }).set_index("date")
+
+    return df
+
+
+def annual_summary(df: pd.DataFrame) -> pd.DataFrame:
+    out = df["total_eff"].resample("Y").agg(["min", "mean", "max"])
+    out.index = out.index.year
+    return out
+
+
+
+# Plot: Total with regressed-degradation smoothing
+def plot_total_with_regressed_degradation(df: pd.DataFrame, cfg: ModelConfig) -> str:
+    """
+    Create a 'smoothed' total efficiency curve by replacing the degradation factor
+    with its 10-year linear-regression prediction, and plot both the raw daily
+    total_eff and the smoothed (regression-based) total.
+    """
+    path = f"{cfg.out_prefix}_total_with_regressed_degradation.png"
+
+    # --- Fit linear regression on the full 10-year degradation (t in years) ---
+    N = len(df)
+    t_years = np.linspace(0.0, float(cfg.years), N).reshape(-1, 1)  # shape (N,1)
+    deg_daily = df["degradation_eff"].values.reshape(-1, 1)
+
+    model = LinearRegression().fit(t_years, deg_daily)
+    deg_pred = model.predict(t_years).flatten()
+
+    slope = float(model.coef_[0])
+    intercept = float(model.intercept_)
+
+    # --- Build regressed total_eff (using predicted degradation) ---
+    dist = df["distance_eff"].values
+    angle = df["angle_eff"].values
+    ecl = df["eclipse_eff"].values
+
+    total_regressed = dist * angle * ecl * deg_pred
+    total_regressed = np.clip(total_regressed, 0.0, 1.2)
+
+    # --- Plot original daily total and regressed (smoothed) total ---
+    plt.figure(figsize=(13, 5))
+    # raw daily total (light)
+    plt.plot(df.index, df["total_eff"].values, label="Daily total_eff (raw)", color="lightgrey", alpha=0.7, linewidth=0.8)
+    # smoothed total from regressed degradation (strong)
+    plt.plot(df.index, total_regressed, label="Total (smoothed via regressed degradation)", color="tab:blue", linewidth=2.2)
+
+    plt.title(f"Total Efficiency — Raw daily vs Smoothed (regression-based degradation) — {cfg.years} years")
+    plt.xlabel("Year")
+    plt.ylabel("Efficiency (fraction of initial)")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.3)
+
+    # annotate degradation regression equation
+    xy_loc = (df.index[int(N * 0.02)], max(total_regressed) * 0.98)
+    plt.text(xy_loc[0], xy_loc[1],
+             f"Degradation fit (10y):\n  deg = {slope:.6f}·t + {intercept:.6f}\n(t in years)",
+             color="black", fontsize=9, bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))
+
+    plt.gcf().autofmt_xdate()
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.show()
+
+    return path
+
+
+# (Optional) plot degradation + regression (for diagnostics)
+def plot_degradation_10yr_with_regression(df: pd.DataFrame, cfg: ModelConfig) -> str:
+    path = f"{cfg.out_prefix}_10yr_degradation_regression.png"
+    N = len(df)
+    t_years = np.linspace(0.0, float(cfg.years), N)
+    deg_daily = df["degradation_eff"].values
+
+    model = LinearRegression().fit(t_years.reshape(-1, 1), deg_daily)
+    deg_pred = model.predict(t_years.reshape(-1, 1))
+
+    slope = float(model.coef_[0])
+    intercept = float(model.intercept_)
+
+    plt.figure(figsize=(12, 5))
+    plt.plot(df.index, deg_daily, label="Daily degradation", color="red", linewidth=0.9, alpha=0.8)
+    plt.plot(df.index, deg_pred, "k--", linewidth=2.0, label=f"Linear fit: deg = {slope:.6f}·t + {intercept:.6f}")
+    plt.title("10-Year Degradation (daily) with Linear Regression")
+    plt.xlabel("Year")
+    plt.ylabel("Degradation efficiency")
+    plt.grid(True, linestyle="--", alpha=0.3)
+    plt.legend()
+    plt.gcf().autofmt_xdate()
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.show()
+    return path
+
+
+# MAIN
+def main():
+    cfg = ModelConfig()
+    df = build_timeseries(cfg)
+
+    # Save CSVs
+    csv_daily = f"{cfg.out_prefix}_daily_{cfg.start_year}_{cfg.start_year + cfg.years - 1}.csv"
+    df.to_csv(csv_daily)
+    annual = annual_summary(df)
+    annual.to_csv(f"{cfg.out_prefix}_annual_summary.csv")
+
+    print(f"[OK] Saved daily CSV -> {csv_daily}")
+    print(f"[OK] Saved annual summary -> {cfg.out_prefix}_annual_summary.csv")
+    print("\nAnnual min/mean/max:")
+    print(annual.round(4))
+
+    # Plots
+    p1 = plot_total_with_regressed_degradation(df, cfg)
+    p2 = plot_degradation_10yr_with_regression(df, cfg)  # diagnostic (optional)
+
+    print(f"[OK] Saved plots -> {p1}, {p2}")
+
+    # Summary
+    print("\nEfficiency range:",
+          f"{df['total_eff'].min():.3f} – {df['total_eff'].max():.3f}")
+    print(f"Mean lifetime efficiency ({cfg.years}y) ≈ {df['total_eff'].mean():.3f}")
+
+
+if __name__ == "__main__":
+    main()
