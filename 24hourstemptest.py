@@ -1,0 +1,171 @@
+import numpy as np
+import pandas as pd
+from dataclasses import dataclass
+from datetime import datetime, timedelta
+from openpyxl import load_workbook
+import glob
+import os
+
+# CONFIG MODEL
+
+@dataclass
+class ModelConfig:
+    start_year: int = 2025
+    years: int = 10
+    eclipse_halfwidth_days: float = 22.5
+    eclipse_peak_minutes: float = 70.0
+    decl_amp_deg: float = 23.44
+    decl_phase_shift_day: int = 80
+    ecc_amp: float = 0.033
+    ecc_perihelion_shift_day: int = 3
+    optical_drop_year1: float = 0.07
+    cell_drop_year1: float = 0.03
+    cell_drop_each_later_year: float = 0.02
+
+
+# HELPER FUNCTIONS
+
+def to_doy(date):
+    return np.array([(d - datetime(d.year, 1, 1)).days + 1 for d in date])
+
+def solar_distance_eff(n, amp, shift):
+    return 1.0 + amp * np.cos(2*np.pi * (n - shift) / 365.0)
+
+def solar_angle_eff(n, amp, shift):
+    delta = amp * np.sin(2*np.pi * (n - shift) / 365.0)
+    return np.cos(np.deg2rad(delta))
+
+def eclipse_eff(n, centers, halfwidth, max_minutes):
+    n = np.asarray(n)
+    effect = np.zeros_like(n, dtype=float)
+
+    for c in centers:
+        d = np.abs(((n - c + 182.5) % 365) - 182.5)
+        w = 0.5 * (1 + np.cos(np.pi * d / halfwidth))
+        w[d > halfwidth] = 0
+        effect += w * max_minutes
+
+    return 1.0 - effect / (24 * 60)
+
+def degradation_eff(days, optical1, cell1, cell_later):
+    year = days // 365
+    optical = np.where(year == 0, 1.0, 1.0 - optical1)
+    cells = (1 - cell1) * np.power((1 - cell_later), year)
+    return optical * cells
+
+
+# EXCEL LOADING
+
+def load_excel_values(path):
+    df = pd.read_excel(path, sheet_name="Analysis", header=None)
+    idx = df[df[0] == "BEST COATING"].index[0]
+
+    return {
+        "heater_power": float(df.iloc[idx + 4, 1]),
+        "annual_kwh": float(df.iloc[idx + 5, 1])
+    }
+
+
+# BUILD TIMESERIES
+
+def build_efficiency(cfg):
+    total_days = cfg.years * 365
+
+    dates = np.array([datetime(cfg.start_year, 1, 1) + timedelta(days=i)
+                      for i in range(total_days)])
+
+    doy = to_doy(dates)
+    idx = np.arange(total_days)
+
+    dist = solar_distance_eff(doy, cfg.ecc_amp, cfg.ecc_perihelion_shift_day)
+    angle = solar_angle_eff(doy, cfg.decl_amp_deg, cfg.decl_phase_shift_day)
+    ecl = eclipse_eff(doy, [80, 263], cfg.eclipse_halfwidth_days, cfg.eclipse_peak_minutes)
+    deg = degradation_eff(idx, cfg.optical_drop_year1, cfg.cell_drop_year1, cfg.cell_drop_each_later_year)
+
+    total_eff = np.clip(dist * angle * ecl * deg, 0, 1.2)
+
+    df = pd.DataFrame({"date": dates, "total_eff": total_eff}).set_index("date")
+
+    df["total_eff_interp"] = df["total_eff"].interpolate(method="linear")
+
+    slope, intercept = np.polyfit(idx, total_eff, 1)
+    trend = slope * idx + intercept
+    df["eff_trendline"] = trend
+
+    return df
+
+
+# PANEL AREA (USABLE POWER = heater × 1.10, absorptivity fixed to 0.86)
+
+def compute_panel_area(heater_power, df_eff, solar_flux):
+    absorptivity = 0.86
+    usable_power = heater_power + (10000) * 1.10
+    absorbed_per_m2 = absorptivity * solar_flux
+
+    eff = df_eff["total_eff"].values
+    eff = np.clip(eff, 1e-9, None)
+
+    area_needed = usable_power / (eff * absorbed_per_m2)
+    worst_idx = np.argmax(area_needed)
+
+    worst_area = area_needed[worst_idx]
+    worst_eff = eff[worst_idx]
+    worst_year = df_eff.index[worst_idx].year
+
+    print("----- PANEL AREA RESULTS -----")
+    print(f"Usable power (10% margin):       {usable_power:.2f} W")
+    print(f"Worst-case year:                 {worst_year}")
+    print(f"Worst efficiency:                {worst_eff:.6f}")
+    print(f"Required panel area:             {worst_area:.4f} m²")
+
+    return worst_area, worst_eff, worst_year, usable_power, absorbed_per_m2
+
+
+# MAIN
+
+def main():
+    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
+    excel_files = glob.glob(excel_pattern)
+
+    if not excel_files:
+        raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
+
+    excel_path = max(excel_files, key=os.path.getctime)
+    vals = load_excel_values(excel_path)
+
+    cfg = ModelConfig()
+    df_eff = build_efficiency(cfg)
+
+    area, worst_eff, worst_year, usable_power, absorbed = compute_panel_area(
+        vals["heater_power"],
+        df_eff,
+        1361
+    )
+
+    return df_eff, area, worst_eff, worst_year, usable_power, excel_path
+
+
+if __name__ == "__main__":
+    df_out, panel_area, worst_eff, worst_year, usable_power, excel_path = main()
+
+    wb = load_workbook(excel_path)
+    ws = wb["Analysis"]
+
+    write_row = 43  # fixed row
+
+    ws[f"A{write_row}"] = "Worst Efficiency"
+    ws[f"B{write_row}"] = float(worst_eff)
+
+    ws[f"A{write_row+1}"] = "Worst Year"
+    ws[f"B{write_row+1}"] = int(worst_year)
+
+    ws[f"A{write_row+2}"] = "Required Panel Area (m²)"
+    ws[f"B{write_row+2}"] = float(panel_area)
+
+    ws[f"A{write_row+3}"] = "Usable Power (W)"
+    ws[f"B{write_row+3}"] = float(usable_power)
+
+    wb.save(excel_path)
+
+    print(f"Results written successfully at rows {write_row}–{write_row+3}.")
