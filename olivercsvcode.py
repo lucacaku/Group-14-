@@ -5,7 +5,6 @@ from scipy.interpolate import interp1d
 import pandas as pd
 from datetime import datetime
 import io
-from tqdm import tqdm
 
 #define constants and parameters
 sigma = 5.67e-8
@@ -14,8 +13,8 @@ albedo = 0.3
 Gravitational_constant = 6.67430e-11
 mass_of_earth = 5.972e24
 
-threshold_low = 293
-threshold_high = 313
+threshold_low = 283
+threshold_high = 323
 average_threshold = (threshold_low + threshold_high) / 2.0
 c = 900.0  #specific heat capacity J/(kg·K)
 
@@ -38,7 +37,6 @@ width  = _get_float_input("Input a width for your satellite (m)", 1.0, 5.0)
 depth  = _get_float_input("Input a depth for your satellite (m)", 3.0, 7.0)
 mass   = _get_float_input("Input a mass for your satellite (kg)", 1000.0, 4000.0)
 
-print("Our code takes a moment to run, bear with us!")
 
 #initialise coating properties array
 coatings = {
@@ -108,7 +106,7 @@ def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
     A_earth_local = float(A_earth_interp(t))
 
     Q_solar = alpha * solar_constant * is_sunlit * A_pres
-    Q_albedo = width * height * solar_constant * alpha * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2)) #assumes reflected sun is uniform hemisphere
+    Q_albedo = width * height * solar_constant * alpha * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2)) 
     Q_ir_loss = epsilon * sigma * (T**4) * A_pres
 
     if T < average_threshold: #heater turns on at low threshold, off at high threshold
@@ -156,7 +154,7 @@ heater_powers = np.arange(0000, 15000, 200) # tests 0-15 kW in 200 W increments
 results = {}
 
 
-for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
+for name, props in coatings.items():
     alpha = props['alpha']
     epsilon = props['epsilon']
 
@@ -174,7 +172,7 @@ for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
 
             # energy balance
             Q_solar = alpha * solar_constant * is_sunlit * A_pres
-            Q_albedo = solar_constant * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2))
+            Q_albedo = width * height * solar_constant * alpha * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2))
             Q_ir_loss = epsilon * sigma * (T**4) * A_pres
 
             if T < average_threshold:
@@ -220,14 +218,14 @@ for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
     results[name]["energy_vs_power"] = energy_vs_power
 
 
-print("clean try")
+
 
 
 for name in results:
     hp = np.array(results[name]["heater_powers"])
     evp = np.array(results[name]["energy_vs_power"])
 
-    if len(evp) < 2:
+    if len(evp)/4 < 2:
         continue
 
     slope = evp[1] - evp[0]
@@ -237,7 +235,7 @@ for name in results:
     for i in range(len(evp)):
         expected = slope * i
 
-        if abs(evp[i] - expected) < 1e-6:
+        if abs(evp[i] - expected) < 5:
             mask[i] = False
 
     hp_clean = hp[mask]
@@ -273,25 +271,26 @@ min_power_3 = get_optimal("Hughson White Paint A276")
 min_power_4 = get_optimal("Bare Polished Aluminum")
 
 
-plt.figure(figsize=(12, 6))
+# Create one single figure before the loop
+plt.figure(figsize=(12,5))
 
 for name, data in results.items():
-    if name != "Bare Polished Aluminum":
-        plt.figure(figsize=(12,5))
-    
-    hp = np.array(data["heater_powers"]) / 1000    # kW
-    evp = np.array(data["energy_vs_power"])        # kWh
 
+    # Convert values
+    hp = np.array(data["heater_powers"]) / 1000     # → kW
+    evp = np.array(data["energy_vs_power"]) / 3     # → kWh/day
+
+    # Plot each coating on the same graph
     plt.plot(hp, evp, 'o-', label=name)
 
+# Formatting
 plt.xlabel("Heater Power (kW)")
-plt.ylabel("Total Energy Used (kWh)")
-plt.title("Heater Energy vs Heater Power for All Coatings")
+plt.ylabel("Total Energy Used (kWh/day)")
+plt.title("Heater Energy vs Heater Power for All Coatings (Single Plot)")
 plt.grid(True)
 plt.legend()
 plt.tight_layout()
 plt.show()
-
 
 coatings['Zerlauts S-13G White Paint']['power'] = min_power_1
 coatings['Ta2O5, SiN, SiO2 Film']['power'] = min_power_2
@@ -417,6 +416,46 @@ def create_six_month_plot():
     plt.grid(True)
     return plt.gcf()
 
+
+# ----------------------------------------------------------
+# COMPUTE ENERGY USED IN ONE DAY DURING THE FIRST ECLIPSE
+# ----------------------------------------------------------
+
+dt_year = time_year[1] - time_year[0]   # 600 sec
+
+# We will compute worst-day energy for the *best coating*
+best_T = results[best_balanced]["T"]
+best_heater = results[best_balanced]["heater"]
+
+# Identify FIRST eclipse season days (59–99)
+first_season_mask = ( (time_year/86400) > 59 ) & ( (time_year/86400) < 99 )
+
+# Identify eclipse intervals using sunlight mask == 0
+sun_mask = sunlight_interp(time_year)  # 1 = sun, 0 = eclipse
+in_eclipse = (sun_mask == 0) & first_season_mask
+
+# Instantaneous heater power use
+power_best = results[best_balanced]["optimal_power_W"]
+P_inst = best_heater * power_best       # W
+E_inst = P_inst * dt_year               # J per timestep
+
+# Zero energy when not in first-season eclipse
+E_inst_eclipse = np.where(in_eclipse, E_inst, 0.0)
+
+# Compute day index for summation
+day_index = np.floor(time_year / 86400).astype(int)
+
+# Energy per day (J/day)
+energy_per_day = np.bincount(day_index, weights=E_inst_eclipse)
+
+# Pick worst day (max energy)
+worst_day_index = np.argmax(energy_per_day)
+energy_worst_day = energy_per_day[worst_day_index]
+
+print(f"\nWorst eclipse day = Day {worst_day_index}")
+print(f"Energy used in that day = {energy_worst_day:.2f} J")
+
+
 #create output data for excel
 output_data = []
 
@@ -460,6 +499,11 @@ output_data.append(['Max Deviation Below', f"{max_below:.2f}", 'K'])
 output_data.append(['Time Above Threshold', f"{len(above)/len(T_best)*100:.2f}", '%'])
 output_data.append(['Avg Deviation Above', f"{avg_above:.2f}", 'K'])
 output_data.append(['Max Deviation Above', f"{max_above:.2f}", 'K'])
+output_data.append(['Energy in a day', f"{energy_worst_day:.2f}", 'J'])
+output_data.append(['', '', ''])
+energy_worst_day=0
+
+output_data.append(['Energy in a day', f"{energy_worst_day:.2f}", 'J'])
 output_data.append(['', '', ''])
 
 #comparison of all coatings
@@ -514,6 +558,7 @@ ws_six = wb.create_sheet('Six Month Graph')
 ws_eclipse.add_image(XLImage(img_eclipse), 'A1')
 ws_six.add_image(XLImage(img_six), 'A1')
 
+
 #save workbook
 wb.save(excel_file)
 
@@ -533,4 +578,5 @@ print(f"Best balanced: {best_balanced}")
 print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {results[best_balanced]['optimal_power_W']:.0f}W")
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
+
 
