@@ -5,6 +5,7 @@ from scipy.interpolate import interp1d
 import pandas as pd
 from datetime import datetime
 import io
+from tqdm import tqdm
 
 #define constants and parameters
 sigma = 5.67e-8
@@ -37,6 +38,7 @@ width  = _get_float_input("Input a width for your satellite (m)", 1.0, 5.0)
 depth  = _get_float_input("Input a depth for your satellite (m)", 3.0, 7.0)
 mass   = _get_float_input("Input a mass for your satellite (kg)", 1000.0, 4000.0)
 
+print("Our code takes a moment to run, bear with us!")
 
 #initialise coating properties array
 coatings = {
@@ -153,8 +155,7 @@ set_interps_for(time_sweep)
 heater_powers = np.arange(0000, 15000, 200) # tests 0-15 kW in 200 W increments
 results = {}
 
-
-for name, props in coatings.items():
+for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
     alpha = props['alpha']
     epsilon = props['epsilon']
 
