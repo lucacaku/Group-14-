@@ -293,7 +293,7 @@ internal_energy_use = 10000  # W
 I_sun = 1361.0  # W/m^2
 absorptivity = 0.86  # default if not present in sheet
 eta_panel = 0.40
-eta_sys = 0.679
+eta_sys = 0.6037
 eta_total = eta_panel * eta_sys
 
 
@@ -544,3 +544,9 @@ excel_wb.save(excel_path)
 excel_wb.close()
 
 print("Area plot exported to Excel sheet: Area_Plot")
+
+os.remove("area_plot.png")
+os.remove("solar_eff_daily_2025_2039.csv")
+os.remove("solar_eff_total_with_regressed_degradation.png")
+os.remove("solar_eff_annual_summary.csv")
+os.remove("solar_eff_10yr_degradation_regression.png")
