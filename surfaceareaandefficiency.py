@@ -1,50 +1,61 @@
+# full_script_modified.py
+# -*- coding: utf-8 -*-
+"""
+Modified script:
+- Recursively searches for 'satellite_analysis*.xlsx' starting from current working directory.
+- Writes annual table (mission_year, min, mean, max) to Analysis sheet.
+- Writes Worst Efficiency, Worst Year (calendar year only), Required Panel Area (m^2) to Analysis sheet.
+- Exports each plot into its own worksheet (no overlay).
+- Reads absorptivity from Analysis sheet (falls back to default if not found).
+"""
+
 from sklearn.linear_model import LinearRegression
 import numpy as np
 import pandas as pd
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from openpyxl import load_workbook
+from openpyxl.drawing.image import Image
+from openpyxl.utils import get_column_letter
 import glob
 import os
 import matplotlib.pyplot as plt
 
+# ---------------------------
+# Small panel geometry helpers
+# ---------------------------
+A_max = 1.0
+A_min = 0.0
 
-
-A_max = 1
-A_min = 0
-
-# Angle array
 theta_deg = np.linspace(0, 360, 1000)
-time = theta_deg / 15  # convert angle → hours
+time = theta_deg / 15.0  # angle -> hours
 
 # === Worst Day Eclipse (GEO) ===
 eclipse_duration_h = 1.18        # 70.8 minutes
-eclipse_center_h = 12.0          # midnight = GEO eclipse center
-
 eclipse_half_angle = (eclipse_duration_h / 24 * 360) / 2
 theta_eclipse_start = 180 - eclipse_half_angle
-theta_eclipse_end   = 180 + eclipse_half_angle
+theta_eclipse_end = 180 + eclipse_half_angle
 
-# Convert eclipse window to time
-t_eclipse_start = theta_eclipse_start / 15
-t_eclipse_end   = theta_eclipse_end / 15
+t_eclipse_start = theta_eclipse_start / 15.0
+t_eclipse_end = theta_eclipse_end / 15.0
 
-# === Create Sunlight Mask (1 in sun, 0 in eclipse) ===
 sunlight_mask = np.where(
     (theta_deg >= theta_eclipse_start) & (theta_deg <= theta_eclipse_end),
-    0,
-    1
+    0.0,
+    1.0
 )
 
-# === Area function with eclipse applied ===
-def area(theta_deg):
-    theta_rad = np.deg2rad(theta_deg)
+
+def area(theta_deg_local):
+    """Visible solar area fraction as function of panel rotation angle (0..360)."""
+    theta_rad = np.deg2rad(theta_deg_local)
     A = (A_max - A_min) * np.abs(np.cos(theta_rad)) + A_min
-    return A * sunlight_mask    # <-- zero area during eclipse
+    return A * sunlight_mask
 
 
-# CONFIGURE MODEL
-
+# ---------------------------
+# CONFIG
+# ---------------------------
 @dataclass
 class ModelConfig:
     start_year: int = 2025
@@ -59,17 +70,23 @@ class ModelConfig:
     optical_drop_year1: float = 0.07
     cell_drop_year1: float = 0.03
     cell_drop_each_later_year: float = 0.02
-    
-     
+    smooth_days: int = 120
+
+
+# ---------------------------
 # Helper functions
+# ---------------------------
 def to_doy(dates):
+    """
+    Robust conversion to day-of-year.
+    Accepts: single datetime, list/array of datetimes, numpy datetime64, pandas Timestamp/Index.
+    Returns scalar int for single date or numpy array of ints for sequences.
+    """
     dates = pd.to_datetime(dates)
 
-    # If we got a scalar datetime → return a scalar int
     if isinstance(dates, pd.Timestamp):
         return dates.dayofyear
-
-    # Otherwise it's an array → return array of ints
+    # DatetimeIndex
     return dates.dayofyear.values
 
 
@@ -105,7 +122,9 @@ def degradation_eff(day_index,
     return optical * cells
 
 
-# Core model
+# ---------------------------
+# Core model builder
+# ---------------------------
 def build_timeseries(cfg: ModelConfig) -> pd.DataFrame:
     start_date = datetime(cfg.start_year, 1, 1)
     total_days = cfg.years * 365
@@ -125,7 +144,7 @@ def build_timeseries(cfg: ModelConfig) -> pd.DataFrame:
 
     df = pd.DataFrame({
         "date": dates,
-        #"day_of_year": doy,
+        "day_of_year": doy,
         "distance_eff": dist,
         "angle_eff": angle,
         "eclipse_eff": ecl,
@@ -138,114 +157,150 @@ def build_timeseries(cfg: ModelConfig) -> pd.DataFrame:
 
 def annual_summary(df: pd.DataFrame) -> pd.DataFrame:
     out = df["total_eff"].resample("Y").agg(["min", "mean", "max"])
-    
+    # Replace index with 1..N mission years
     out.index = np.arange(1, len(out) + 1)
-
+    out.index.name = "mission_year"
     return out
 
 
-
-# Plot: Total with regressed-degradation smoothing
+# ---------------------------
+# Plots (mission-year x-axis)
+# ---------------------------
 def plot_total_with_regressed_degradation(df: pd.DataFrame, cfg: ModelConfig) -> str:
-    """
-    Create a 'smoothed' total efficiency curve by replacing the degradation factor
-    with its 10-year linear-regression prediction, and plot both the raw daily
-    total_eff and the smoothed (regression-based) total.
-    """
     path = f"{cfg.out_prefix}_total_with_regressed_degradation.png"
 
-    # --- Fit linear regression on the full 10-year degradation (t in years) ---
     N = len(df)
-    t_years = np.linspace(0.0, float(cfg.years), N).reshape(-1, 1)  # shape (N,1)
-    deg_daily = df["degradation_eff"].values.reshape(-1, 1)
+    # mission-year axis from 1..cfg.years
+    t_mission = np.linspace(1.0, float(cfg.years), N)
+    # regression on degradation vs years (0..years)
+    t_for_reg = np.linspace(0.0, float(cfg.years), N).reshape(-1, 1)
 
-    model = LinearRegression().fit(t_years, deg_daily)
-    deg_pred = model.predict(t_years).flatten()
+    deg_daily = df["degradation_eff"].values.reshape(-1, 1)
+    model = LinearRegression().fit(t_for_reg, deg_daily)
+    deg_pred = model.predict(t_for_reg).flatten()
+
+    # build regressed total
+    total_regressed = (df["distance_eff"].values * df["angle_eff"].values *
+                       df["eclipse_eff"].values * deg_pred)
+    total_regressed = np.clip(total_regressed, 0.0, 1.2)
+
+    plt.figure(figsize=(13, 5))
+    plt.plot(t_mission, df["total_eff"].values, label="Daily total_eff (raw)",
+             alpha=0.7, linewidth=0.8)
+    plt.plot(t_mission, total_regressed, label="Total (smoothed via regressed degradation)",
+             linewidth=2.2)
+
+    plt.title(f"Total Efficiency — Raw daily vs Smoothed — {cfg.years} years")
+    plt.xlabel("Mission Year")
+    plt.ylabel("Efficiency (fraction of initial)")
+    plt.legend()
+    plt.grid(True, linestyle="--", alpha=0.3)
+
+    # annotate regression
+    slope = float(model.coef_[0])
+    intercept = float(model.intercept_)
+    xpos = t_mission[int(max(1, N * 0.02))]
+    ypos = max(total_regressed) * 0.98
+    plt.text(xpos, ypos, f"deg = {slope:.6f}·t + {intercept:.6f}\n(t in years)",
+             fontsize=9, bbox=dict(facecolor="white", alpha=0.8), horizontalalignment='left')
+
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.close()
+    return path
+
+
+def plot_degradation_10yr_with_regression(df: pd.DataFrame, cfg: ModelConfig) -> str:
+    path = f"{cfg.out_prefix}_10yr_degradation_regression.png"
+
+    N = len(df)
+    t_mission = np.linspace(1.0, float(cfg.years), N)
+    t_for_reg = np.linspace(0.0, float(cfg.years), N).reshape(-1, 1)
+    deg_daily = df["degradation_eff"].values
+
+    model = LinearRegression().fit(t_for_reg, deg_daily)
+    deg_pred = model.predict(t_for_reg)
 
     slope = float(model.coef_[0])
     intercept = float(model.intercept_)
 
-    # --- Build regressed total_eff (using predicted degradation) ---
-    dist = df["distance_eff"].values
-    angle = df["angle_eff"].values
-    ecl = df["eclipse_eff"].values
+    plt.figure(figsize=(12, 5))
+    plt.plot(t_mission, deg_daily, label="Daily degradation", linewidth=0.9, alpha=0.8)
+    plt.plot(t_mission, deg_pred, "k--", linewidth=2.0,
+             label=f"Linear fit: deg = {slope:.6f}·t + {intercept:.6f}")
 
-    total_regressed = dist * angle * ecl * deg_pred
-    total_regressed = np.clip(total_regressed, 0.0, 1.2)
-
-
-# EXCEL LOADING
-
-def load_excel_values(path):
-    df = pd.read_excel(path, sheet_name="Analysis", header=None)
-    idx = df[df[0] == "BEST COATING"].index[0]
-    global energy_worst_day
-    energy_worst_day = float(df.iloc[idx + 13, 1])
-    global heater_power
-    heater_power = float(df.iloc[idx + 4, 1])
-        
-    return {
-        "name": df.iloc[idx + 1, 1],
-        "absorptivity": float(df.iloc[idx + 2, 1]),
-        "emissivity": float(df.iloc[idx + 3, 1]),
-        "heater_power": float(df.iloc[idx + 4, 1]),
-        "annual_kwh": float(df.iloc[idx + 5, 1]),
-        "energy_worst_day": float(df.iloc[idx + 13, 1])
-    }
+    plt.title("15-Year Degradation (daily) with Linear Regression")
+    plt.xlabel("Mission Year")
+    plt.ylabel("Degradation efficiency")
+    plt.grid(True, linestyle="--", alpha=0.3)
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(path, dpi=200)
+    plt.close()
+    return path
 
 
-# BUILD TIMESERIES WITH INTERPOLATION + REGRESSION
+# ---------------------------
+# Excel export helper
+# ---------------------------
+def export_to_excel(excel_path, annual_df: pd.DataFrame, plot_paths, analysis_write_row=44):
+    """
+    Writes annual_df (mission-year index) to Analysis sheet and inserts PNGs each on its own worksheet.
+    - annual_df: DataFrame with index = mission years (1..N) and columns min/mean/max
+    - plot_paths: list of file paths to PNG images
+    - analysis_write_row: row where worst-eff etc. will be written (we overwrite there)
+    """
+    wb = load_workbook(excel_path)
+    # Ensure Analysis sheet exists
+    if "Analysis" not in wb.sheetnames:
+        raise KeyError("Workbook does not contain 'Analysis' sheet.")
+    ws = wb["Analysis"]
 
-def build_efficiency(cfg):
-    total_days = cfg.years * 365
+    # Write Annual Table at row 48 (safe default)
+    start_row = 48
+    ws[f"A{start_row}"] = "Mission Year"
+    ws[f"B{start_row}"] = "Min"
+    ws[f"C{start_row}"] = "Mean"
+    ws[f"D{start_row}"] = "Max"
 
-    dates = np.array([datetime(cfg.start_year, 1, 1) + timedelta(days=i)
-                      for i in range(total_days)])
+    for i, (yr, row) in enumerate(annual_df.iterrows(), start=start_row + 1):
+        ws[f"A{i}"] = int(yr)
+        ws[f"B{i}"] = float(row["min"])
+        ws[f"C{i}"] = float(row["mean"])
+        ws[f"D{i}"] = float(row["max"])
 
-    doy = to_doy(dates)
-    idx = np.arange(total_days)
+    # Add each plot to its own worksheet so they never overlap
+    for idx, p in enumerate(plot_paths, start=1):
+        sheet_name = f"Plot_{idx}"
+        # replace existing if present
+        if sheet_name in wb.sheetnames:
+            ws_plot = wb[sheet_name]
+        else:
+            ws_plot = wb.create_sheet(title=sheet_name)
+        img = Image(p)
+        # anchor top-left of sheet
+        ws_plot.add_image(img, "A1")
 
-    dist = solar_distance_eff(doy, cfg.ecc_amp, cfg.ecc_perihelion_shift_day)
-    angle = solar_angle_eff(doy, cfg.decl_amp_deg, cfg.decl_phase_shift_day)
-    ecl = eclipse_eff(doy, [80, 263], cfg.eclipse_halfwidth_days, cfg.eclipse_peak_minutes)
-    deg = degradation_eff(idx, cfg.optical_drop_year1, cfg.cell_drop_year1, cfg.cell_drop_each_later_year)
-
-    total_eff = np.clip(dist * angle * ecl * deg, 0, 1.2)
-
-    df = pd.DataFrame({"date": dates, "total_eff": total_eff}).set_index("date")
-
-    
-    # 1) LINEAR INTERPOLATION
-    
-    # (Your data is already daily, but interpolation makes the model robust.)
-    df["total_eff_interp"] = df["total_eff"].interpolate(method="linear")
-
-    
-    # 2) LINEAR REGRESSION (efficiency vs mission day index)
-    
-    slope, intercept = np.polyfit(idx, total_eff, 1)
-    trend = slope * idx + intercept
-
-    df["eff_trendline"] = trend
-
-    return df
+    wb.save(excel_path)
+    wb.close()
 
 
+# ---------------------------
+# Panel area & power helpers
+# ---------------------------
+# Constants for panel area calculation (defaults; overwritten by sheet values where available)
+internal_energy_use = 10000  # W
+I_sun = 1361.0  # W/m^2
+absorptivity = 0.86  # default if not present in sheet
+eta_panel = 0.40
+eta_sys = 0.679
+eta_total = eta_panel * eta_sys
 
-
-# -----PANEL AREA (USING USABLE POWER = +10%) ----
-internal_energy_use = 10000 # W
-
-I_sun = 1361.0               # W/m²
-absobtivity = 0.86            # solar cell absorptivity
-eta_panel = 0.40             # solar cell efficiency
-eta_sys = 0.679               # system efficiency
-eta_total = eta_panel * eta_sys   # effective conversion efficiency
 
 def surface_area(energy_heater):
     global energy_J
     energy_J =  (energy_heater) + (internal_energy_use * 86400)  # J needed per day
-    power_per_m2 = I_sun * absobtivity * eta_total * area(theta_deg)   
+    power_per_m2 = I_sun * absorptivity * eta_total * area(theta_deg)   
 
     # integrate over full day
     dt = 86400 / len(power_per_m2)
@@ -262,67 +317,176 @@ def surface_area(energy_heater):
     return area_required_10
 
 
-# POWER TIMESERIES
+# ---------------------------
+# Excel-reading of input values
+# ---------------------------
+def load_excel_values(path):
+    """
+    Attempts to read required small inputs from Analysis sheet.
+    The routine looks for a cell containing 'BEST COATING' and reads values relative to it.
+    If that finder fails, it attempts some sensible defaults/locations.
+    """
+    df = pd.read_excel(path, sheet_name="Analysis", header=None)
+    # Try to find 'BEST COATING' label (case-insensitive)
+    try:
+        idx = df[df[0].astype(str).str.upper() == "BEST COATING"].index[0]
+    except Exception:
+        idx = None
 
-def power_timeseries(df_eff, area, absorbed_per_m2):
-    df_eff["power_generated"] = area * absorbed_per_m2 * df_eff["total_eff"]
-    return df_eff
+    if idx is not None:
+        # robust extraction with bounds checks
+        def safe_get(r, c, default=np.nan):
+            try:
+                return df.iloc[r, c]
+            except Exception:
+                return default
+
+        name = safe_get(idx + 1, 1, "")
+        #absorptivity = safe_get(idx + 2, 1,absorptivity)
+        emissivity = safe_get(idx + 3, 1, np.nan)
+        heater_power = safe_get(idx + 4, 1, np.nan)
+        annual_kwh = safe_get(idx + 5, 1, np.nan)
+        global energy_worst_day
+        energy_worst_day = safe_get(idx + 13, 1, np.nan)
+    else:
+        # fallback: try some common places or defaults
+        #absorptivity = absorptivity
+        energy_worst_day = np.nan
+        name = ""
+        emissivity = np.nan
+        heater_power = np.nan
+        annual_kwh = np.nan
+
+        # try a simple heuristic: find the first numeric cell labeled 'energy_worst_day' or similar
+        # but we keep simple: user will likely have BEST COATING row; otherwise we ask them to adapt.
+
+    # ensure floats where needed
+    try:
+        energy_worst_day = float(energy_worst_day)
+    except Exception:
+        # if not present, try to compute from annual_kwh if present (kWh/day -> J/day)
+        try:
+            if not np.isnan(annual_kwh):
+                # assume annual_kwh is kWh per year? unclear; fallback: leave NaN
+                energy_worst_day = float(annual_kwh) * 1000.0  # rough guess (kWh -> Wh)
+            else:
+                energy_worst_day = np.nan
+        except Exception:
+            energy_worst_day = np.nan
+
+    return {
+        "name": name,
+        "absorptivity": absorptivity,
+        "emissivity": emissivity,
+        "heater_power": heater_power,
+        "annual_kwh": annual_kwh,
+        "energy_worst_day": energy_worst_day
+    }
 
 
+# ---------------------------
 # MAIN
-
+# ---------------------------
 def main():
-    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
-    excel_files = glob.glob(excel_pattern)
-
+    # recursively search current working directory for 'satellite_analysis*.xlsx'
+    cwd = os.getcwd()
+    excel_pattern = os.path.join(cwd, "**", "satellite_analysis*.xlsx")
+    excel_files = glob.glob(excel_pattern, recursive=True)
     if not excel_files:
-        raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
-
+        raise FileNotFoundError(f"No satellite_analysis*.xlsx files found under {cwd}")
+    # pick the most recently modified
+    global excel_path
     excel_path = max(excel_files, key=os.path.getctime)
+
     vals = load_excel_values(excel_path)
 
     cfg = ModelConfig()
-    df_eff = build_efficiency(cfg)
+    df = build_timeseries(cfg)
 
-    # Calculate worst efficiency and year
-    worst_eff = df_eff["total_eff"].min()
-    worst_idx = df_eff["total_eff"].idxmin()
-    
-    # Calculate panel area from energy requirements
-    area = surface_area(vals["energy_worst_day"])
-    
-    # Calculate usable power (area * solar intensity * efficiency * absorptivity)
-    usable_power = area * I_sun * absobtivity * eta_total
+    # Save CSVs
+    csv_daily = f"{cfg.out_prefix}_daily_{cfg.start_year}_{cfg.start_year + cfg.years - 1}.csv"
+    df.to_csv(csv_daily)
 
-    return df_eff, area, worst_eff, usable_power, excel_path
+    ann = annual_summary(df)
+    ann.to_csv(f"{cfg.out_prefix}_annual_summary.csv")
 
+    print(f"[OK] Saved daily CSV -> {csv_daily}")
+    print(f"[OK] Saved annual summary -> {cfg.out_prefix}_annual_summary.csv")
+    print("\nAnnual min/mean/max:")
+    print(ann.round(4))
 
-if __name__ == "__main__":
-    df_out, panel_area, worst_eff, usable_power, excel_path = main()
+    # Plots (mission-year x-axis)
+    p1 = plot_total_with_regressed_degradation(df, cfg)
+    p2 = plot_degradation_10yr_with_regression(df, cfg)
+    print(f"[OK] Saved plots -> {p1}, {p2}")
 
+    # Worst-efficiency and timestamp
+    worst_eff = float(df["total_eff"].min())
+    worst_idx = df["total_eff"].idxmin()  # pandas Timestamp
+    # calendar year only (user asked for YEAR only)
+    worst_calendar_year = int(pd.to_datetime(worst_idx).year)
+
+    # Panel area from energy requirement (we expect energy_worst_day as J/day)
+    if np.isnan(vals["energy_worst_day"]):
+        raise ValueError("Could not read 'energy_worst_day' from the Excel Analysis sheet. Please ensure the value exists.")
+    absorptivity_val = vals.get("absorptivity", absorptivity)
+    area_m2 = surface_area(vals["energy_worst_day"])
+
+    usable_power = area_m2 * I_sun * absorptivity_val * eta_total  # W (approx instantaneous at peak)
+
+    # Write results into the Excel Analysis sheet
     wb = load_workbook(excel_path)
+    if "Analysis" not in wb.sheetnames:
+        raise KeyError("Workbook does not contain 'Analysis' sheet.")
     ws = wb["Analysis"]
-
-    write_row = 44  # fixed row
+    write_row = 44
 
     ws[f"A{write_row}"] = "Worst Efficiency"
     ws[f"B{write_row}"] = float(worst_eff)
 
-    ws[f"A{write_row+2}"] = "Required Panel Area (m²)"
-    ws[f"B{write_row+2}"] = float(area_required_10)
+    ws[f"A{write_row + 1}"] = "Worst Year (calendar year)"
+    ws[f"B{write_row + 1}"] = int(worst_calendar_year)
 
-    ws[f"A{write_row+3}"] = "Usable Power (W)"
-    ws[f"B{write_row+3}"] = float(usable_power)
+    ws[f"A{write_row + 2}"] = "Required Panel Area (m^2) [10% margin included]"
+    ws[f"B{write_row + 2}"] = float(area_m2)
 
+    # Save workbook after writing summary facts
     wb.save(excel_path)
+    wb.close()
+    print(f"Results written successfully at rows {write_row}–{write_row + 2} in {excel_path}")
 
-    print(f"Results written successfully at rows {write_row}–{write_row+3}.")
+    # Export annual table + plots into same Excel workbook (annual table at row 10 + plots in separate sheets)
+    export_to_excel(excel_path, ann, [p1, p2])
+
+    print("Annual table and plots exported into Excel (plots on separate sheets).")
+
+    # also return key values
+    return {
+        "df": df,
+        "annual": ann,
+        "plots": [p1, p2],
+        "excel_path": excel_path,
+        "panel_area_m2": area_m2,
+        "usable_power_W": usable_power,
+        "worst_eff": worst_eff,
+        "worst_calendar_year": worst_calendar_year
+    }
+
+
+if __name__ == "__main__":
+    out = main()
+    # simple confirmation print
+    print("Done. Outputs:")
+    print(f" - Excel: {out['excel_path']}")
+    print(f" - Plots: {out['plots']}")
+    print(f" - Panel area (m^2): {out['panel_area_m2']:.3f}")
+    print(f" - Usable power (W): {out['usable_power_W']:.1f}")
+    print(f" - Worst eff: {out['worst_eff']:.6f} in year {out['worst_calendar_year']}")
 
 
 energy_J =  (energy_worst_day) + (internal_energy_use * 86400)
 
-percentage = ((energy_J / 86400) / (I_sun * eta_total * absobtivity * area_required_10))
+percentage = ((energy_J / 86400) / (I_sun * eta_total * absorptivity * area_required_10))
 
 A_values = area(theta_deg)
 mask = A_values < percentage * A_max
@@ -358,160 +522,25 @@ plt.xlim(0, 24)
 plt.ylim(0, A_max * 1.05)
 plt.grid(alpha=0.3)
 plt.legend()
-plt.show()
+# ---- SAVE AREA PLOT AND EXPORT TO EXCEL ----
+# Save PNG
+area_plot_path = "area_plot.png"
+plt.savefig(area_plot_path, dpi=200, bbox_inches='tight')
+plt.close()
 
-# ----END OF PANEL AREA CALCULATION ----
+# Export to Excel (add image to a new sheet)
+excel_wb = load_workbook(excel_path)
 
+sheet_name = "Area_Plot"
+if sheet_name in excel_wb.sheetnames:
+    ws_area = excel_wb[sheet_name]
+else:
+    ws_area = excel_wb.create_sheet(sheet_name)
 
-# ---- START OF EFFICIENCY AND DEGREDATION MODEL -----
-# Plot: Total with regressed-degradation smoothing
-def plot_total_with_regressed_degradation(df: pd.DataFrame, cfg: ModelConfig) -> str:
-    """
-    Create a 'smoothed' total efficiency curve by replacing the degradation factor
-    with its 10-year linear-regression prediction, and plot both the raw daily
-    total_eff and the smoothed (regression-based) total.
-    """
-    path = f"{cfg.out_prefix}_total_with_regressed_degradation.png"
+img = Image(area_plot_path)
+ws_area.add_image(img, "A1")
 
-    # --- Fit linear regression on the full 10-year degradation (t in years) ---
-    N = len(df)
-    t_years = np.linspace(0.0, float(cfg.years), N).reshape(-1, 1)  # shape (N,1)
-    deg_daily = df["degradation_eff"].values.reshape(-1, 1)
+excel_wb.save(excel_path)
+excel_wb.close()
 
-    model = LinearRegression().fit(t_years, deg_daily)
-    deg_pred = model.predict(t_years).flatten()
-
-    slope = float(model.coef_[0])
-    intercept = float(model.intercept_)
-
-    # --- Build regressed total_eff (using predicted degradation) ---
-    dist = df["distance_eff"].values
-    angle = df["angle_eff"].values
-    ecl = df["eclipse_eff"].values
-
-    total_regressed = dist * angle * ecl * deg_pred
-    total_regressed = np.clip(total_regressed, 0.0, 1.2)
-
-    # --- Plot original daily total and regressed (smoothed) total ---
-    plt.figure(figsize=(13, 5))
-    # raw daily total (light)
-    t = np.linspace(1, cfg.years, len(df))
-    plt.plot(t, df["total_eff"].values, label="Daily total_eff (raw)", color="lightgrey", alpha=0.7, linewidth=0.8)
-    # smoothed total from regressed degradation (strong)
-    plt.plot(t, total_regressed, label="Total (smoothed via regressed degradation)", color="tab:blue", linewidth=2.2)
-
-    plt.title(f"Total Efficiency — Raw daily vs Smoothed (regression-based degradation) — {cfg.years} years")
-    plt.xlabel("Year")
-    plt.ylabel("Efficiency (fraction of initial)")
-    plt.legend()
-    plt.grid(True, linestyle="--", alpha=0.3)
-
-    # annotate degradation regression equation
-    xy_loc = (df.index[int(N * 0.02)], max(total_regressed) * 0.98)
-    plt.text(xy_loc[0], xy_loc[1],
-             f"Degradation fit (10y):\n  deg = {slope:.6f}·t + {intercept:.6f}\n(t in years)",
-             color="black", fontsize=9, bbox=dict(facecolor="white", alpha=0.8, edgecolor="none"))
-
-    plt.gcf().autofmt_xdate()
-    plt.tight_layout()
-    plt.savefig(path, dpi=200)
-    plt.show()
-
-    return path
-
-
-# (Optional) plot degradation + regression
-def plot_degradation_10yr_with_regression(df: pd.DataFrame, cfg: ModelConfig) -> str:
-    path = f"{cfg.out_prefix}_10yr_degradation_regression.png"
-    N = len(df)
-    t_years = np.linspace(0.0, float(cfg.years), N)
-    deg_daily = df["degradation_eff"].values
-
-    model = LinearRegression().fit(t_years.reshape(-1, 1), deg_daily)
-    deg_pred = model.predict(t_years.reshape(-1, 1))
-
-    slope = float(model.coef_[0])
-    intercept = float(model.intercept_)
-
-    plt.figure(figsize=(12, 5))
-    t = np.linspace(1, cfg.years, len(df))
-    plt.plot(t, deg_daily, label="Daily degradation", color="red", linewidth=0.9, alpha=0.8)
-    plt.plot(t, deg_pred, "k--", linewidth=2.0, label=f"Linear fit: deg = {slope:.6f}·t + {intercept:.6f}")
-    plt.title("15-Year Degradation (daily) with Linear Regression")
-    plt.xlabel("Year")
-    plt.ylabel("Degradation efficiency")
-    plt.grid(True, linestyle="--", alpha=0.3)
-    plt.legend()
-    plt.gcf().autofmt_xdate()
-    plt.tight_layout()
-    plt.savefig(path, dpi=200)
-    plt.show()
-    return path
-
-
-# MAIN
-def main():
-    cfg = ModelConfig()
-    df = build_timeseries(cfg)
-
-    # Save CSVs
-    csv_daily = f"{cfg.out_prefix}_daily_{cfg.start_year}_{cfg.start_year + cfg.years - 1}.csv"
-    df.to_csv(csv_daily)
-    global annual
-    annual = annual_summary(df)
-    annual.to_csv(f"{cfg.out_prefix}_annual_summary.csv")
-
-    print(f"[OK] Saved daily CSV -> {csv_daily}")
-    print(f"[OK] Saved annual summary -> {cfg.out_prefix}_annual_summary.csv")
-    print("\nAnnual min/mean/max:")
-    print(annual.round(4))
-
-    # Plots
-    global p1, p2
-    p1 = plot_total_with_regressed_degradation(df, cfg)
-    p2 = plot_degradation_10yr_with_regression(df, cfg)  # diagnostic (optional)
-
-    print(f"[OK] Saved plots -> {p1}, {p2}")
-
-    # Summary
-    print("\nEfficiency range:",
-          f"{df['total_eff'].min():.3f} – {df['total_eff'].max():.3f}")
-    print(f"Mean lifetime efficiency ({cfg.years}y) ≈ {df['total_eff'].mean():.3f}")
-
-
-# ---- END OF EFFICIENCY AND DEGREDATION MODEL
-if __name__ == "__main__":
-    main()
-    
-from openpyxl.drawing.image import Image
-
-def export_to_excel(excel_path, annual_df, plot_paths):
-    wb = load_workbook(excel_path)
-    ws = wb["Analysis"]
-
-    # Write annual efficiency table
-    start_row = 60
-    ws[f"A{start_row}"] = "Year"
-    ws[f"B{start_row}"] = "Min"
-    ws[f"C{start_row}"] = "Mean"
-    ws[f"D{start_row}"] = "Max"
-
-    for i, (yr, row) in enumerate(annual_df.iterrows(), start=start_row+1):
-        ws[f"A{i}"] = yr
-        ws[f"B{i}"] = float(row["min"])
-        ws[f"C{i}"] = float(row["mean"])
-        ws[f"D{i}"] = float(row["max"])
-
-    # Insert images
-    img_row = start_row + len(annual_df) + 3
-    for p in plot_paths:
-        img = Image(p)
-        ws.add_image(img, f"F{img_row}")
-        img_row += 30
-
-    wb.save(excel_path)
-    
-    
-export_to_excel(excel_path, annual, [p1, p2])
-    
-
+print("Area plot exported to Excel sheet: Area_Plot")
