@@ -10,12 +10,12 @@ from tqdm import tqdm
 #define constants and parameters
 sigma = 5.67e-8 #Stefan-Boltzmann constant
 solar_constant = 1361 # W/m²
-albedo = 0.3 #Earth average albedo
+albedo = 0.3 #Earth albedo value (assumed)
 Gravitational_constant = 6.67430e-11 # m³/kg·s²
 mass_of_earth = 5.972e24 # kg
 
-threshold_low = 283 
-threshold_high = 323
+threshold_low = 283 #K
+threshold_high = 323 #K
 average_threshold = (threshold_low + threshold_high) / 2.0
 c = 900.0 #specific heat capacity J/kg·K (aluminium)
 
@@ -32,6 +32,10 @@ def _get_float_input(prompt, min_val, max_val):
             print(f"Out of range — enter a value between {min_val} and {max_val}.")
             continue
         return val
+
+print("In the report for our satellite, we used the following parameters:\n",
+      "2.7 m height, 3.6 m width, 5.7 m depth, 2630 kg mass.\n",
+      "To replicate the report you can use these, otherwise feel free to test any values you want.")
 
 height = _get_float_input("Input a height for your satellite (m)", 1.0, 5.0)
 width  = _get_float_input("Input a width for your satellite (m)", 1.0, 5.0)
@@ -56,7 +60,7 @@ year_seconds = 365.25 * 24 * 3600 # seconds in a year
 orbital_radius = earth_radius + altitude 
 orbital_period = 2 * np.pi * np.sqrt(orbital_radius**3 / (Gravitational_constant * mass_of_earth)) #Keplers 3rd law (~23.93 hours)
 
-dt = 10 * 60 #small timestep so accurate, not too small to be slow
+dt = 10 * 60 #small timestep for accuracy (10 minutes)
 day_start = 0
 simulation_end = 365 * 24 * 3600
 
@@ -64,7 +68,7 @@ time_orbit = np.linspace(0, orbital_period, 1000)
 time_year = np.linspace(0, year_seconds, int(year_seconds / dt))
 
 time_sweep_days = 3 #short time around eclipse to test heater powers
-time_sweep = np.arange(79*24*3600, (79 + time_sweep_days) * 24 * 3600, dt) 
+time_sweep = np.arange(78*24*3600, (78 + time_sweep_days) * 24 * 3600, dt) #day 79 assumed to be max eclipse day, => three day window around that
 
 #eclipse and area functions
 def eclipse_mask(t):
@@ -73,7 +77,7 @@ def eclipse_mask(t):
     season2 = (day > 239) & (day < 279)
     in_season = season1 | season2
 
-    eclipse_duration = 0.0708 * 86400
+    eclipse_duration = 0.049 * 86400 #~70 minute eclipse
     orbit_phase = np.atleast_1d(t) % orbital_period #handles scalar and array inputs for time
     in_eclipse = orbit_phase < eclipse_duration
 
@@ -86,7 +90,7 @@ def set_interps_for(time_array):
 
     #tile presented area over orbits to match time_array length
     theta_rad = np.pi/4 * np.sin(2 * np.pi * time_orbit / orbital_period)
-    A_presented_orbit = height * (np.abs(width * np.cos(theta_rad)) + np.abs(depth * np.sin(theta_rad))) #formula assumes single plane rotation
+    A_presented_orbit = height * (np.abs(width * np.cos(theta_rad)) + np.abs(depth * np.sin(theta_rad))) #formula assumes no spinning (correct for our assumed model)
 
     reps = int(np.ceil(len(time_array) / len(A_presented_orbit)))
     A_presented = np.tile(A_presented_orbit, reps)[:len(time_array)] 
@@ -95,7 +99,7 @@ def set_interps_for(time_array):
     A_earth_orbit = np.pi * (earth_radius**2) * (1 - np.cos(half_angle_earth))
     A_earth = A_earth_orbit * sunlight
 
-    # interpolating functions for thermal calculations
+    #interpolating functions for thermal calculations
     A_pres_interp = interp1d(time_array, A_presented, kind='linear', fill_value='extrapolate')
     sunlight_interp = interp1d(time_array, sunlight, kind='nearest', fill_value='extrapolate')
     A_earth_interp = interp1d(time_array, A_earth, kind='nearest', fill_value='extrapolate')
@@ -123,7 +127,7 @@ def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
 
     return dTdt, heater_state, Q_heater
 
-# runge-kutta 4th order
+#runge-kutta 4th order integration with heater
 def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_init=average_threshold): 
     n = len(time_array)
     T = np.zeros(n)
@@ -137,7 +141,7 @@ def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_ini
         t = time_array[i]
         h = time_array[i + 1] - time_array[i]
 
-        #rk4 slopes
+        #rk4 slopes 
         k1, h1_state, Qh1 = thermal_rhs(t, T[i], alpha, epsilon, heater_state[i], heater_power) 
         k2, h2_state, Qh2 = thermal_rhs(t + h/2, T[i] + h/2*k1, alpha, epsilon, h1_state, heater_power)
         k3, h3_state, Qh3 = thermal_rhs(t + h/2, T[i] + h/2*k2, alpha, epsilon, h2_state, heater_power)
@@ -154,16 +158,16 @@ def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_ini
 set_interps_for(time_sweep)
 
 #heater power sweep to find optimal power for each coating
-heater_powers = np.arange(0000, 15000, 200) # tests 0-15 kW in 200 W increments
+heater_powers = np.arange(0, 15000, 100) #tests 0-15 kW in 100 W increments 
 results = {}
 
 for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
     alpha = props['alpha']
     epsilon = props['epsilon']
 
-    # initialize container for this coating's results
+    #initialize container for this coating's results
     results[name] = {}
-    energy_vs_power = []  # store total heater energy for each power level
+    energy_vs_power = []  #store total heater energy for each power level
 
     for power in heater_powers:
         def thermal_rhs_power(t, T, alpha=alpha, epsilon=epsilon, heater_state=0):
@@ -172,7 +176,7 @@ for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
             is_sunlit = float(sunlight_interp(t))
             A_earth_local = float(A_earth_interp(t))
 
-            # energy balance
+            #energy balance
             Q_solar = alpha * solar_constant * is_sunlit * A_pres
             Q_albedo = width * height * solar_constant * alpha * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2))
             Q_ir_loss = epsilon * sigma * (T**4) * A_pres
@@ -188,7 +192,7 @@ for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
             dTdt = Q_net / (mass * c)
             return dTdt, heater_state, Q_heater
 
-        # integrate temperature over the short sweep time array
+        #integrate temperature over the short sweep time array
         n = len(time_sweep)
         T = np.zeros(n)
         heater_state = np.zeros(n)
@@ -201,7 +205,7 @@ for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
             t = time_sweep[i]
             h = time_sweep[i + 1] - time_sweep[i]
 
-            # RK4 integration
+            #rk4 integration
             k1, h1_state, Qh1 = thermal_rhs_power(t, T[i])
             k2, h2_state, Qh2 = thermal_rhs_power(t + h/2, T[i] + h/2*k1)
             k3, h3_state, Qh3 = thermal_rhs_power(t + h/2, T[i] + h/2*k2)
@@ -215,11 +219,11 @@ for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
         total_energy_kWh = heater_energy[-1] / 3.6e6
         energy_vs_power.append(total_energy_kWh)
     
-    # After the inner loop over power
+    #after the inner loop over power
     results[name]["heater_powers"] = heater_powers
     results[name]["energy_vs_power"] = energy_vs_power
 
-# Data cleaning to remove near-linear sections (heater does not heat enough)
+#data cleaning to remove near-linear sections (heater does not heat enough)
 
 for name in results:
     hp = np.array(results[name]["heater_powers"])
@@ -244,7 +248,7 @@ for name in results:
     results[name]["heater_powers"] = hp_clean
     results[name]["energy_vs_power"] = evp_clean
 
-# find optimal heater power for each coating
+#find optimal heater power for each coating
 for name in results:
     hp = results[name]["heater_powers"]
     evp = results[name]["energy_vs_power"]
@@ -257,7 +261,6 @@ for name in results:
     optimal = float(hp[idx])
 
     results[name]["optimal_power_W"] = optimal
-    print(f"{name} → optimal power = {optimal} W")
 
 def get_optimal(name):
     entry = results.get(name)
@@ -271,22 +274,23 @@ min_power_3 = get_optimal("Hughson White Paint A276")
 min_power_4 = get_optimal("Bare Polished Aluminum")
 
 
-# Create one single figure before the loop
+#create one single figure before the loop
 plt.figure(figsize=(12,5))
 
 for name, data in results.items():
+    if name != "Bare Polished Aluminum":
+        #convert values
+        hp = np.array(data["heater_powers"]) / 1000     #convert to kW
+        evp = np.array(data["energy_vs_power"]) / 3     #convert to kWh/day
 
-    # Convert values
-    hp = np.array(data["heater_powers"]) / 1000     # → kW
-    evp = np.array(data["energy_vs_power"]) / 3     # → kWh/day
+        #plot each coating on the same graph
+        plt.plot(hp, evp, 'o-', label=name)
 
-    # Plot each coating on the same graph
-    plt.plot(hp, evp, 'o-', label=name)
-
-# Formatting
+#formatting
+plt.xlim(0,15)
 plt.xlabel("Heater Power (kW)")
 plt.ylabel("Total Energy Used (kWh/day)")
-plt.title("Heater Energy vs Heater Power for All Coatings (Single Plot)")
+plt.title("Heater Energy vs Heater Power for All Coatings")
 plt.grid(True)
 plt.legend()
 plt.tight_layout()
@@ -300,7 +304,7 @@ coatings['Bare Polished Aluminum']['power'] = min_power_4
 #full year simulation with optimal heater powers
 set_interps_for(time_year)
 
-for name, props in coatings.items():
+for name, props in tqdm(list(coatings.items()), desc="Full Year Simulation"):
     alpha, epsilon = props['alpha'], props['epsilon']
     power = props.get('power',0) #use previously found optimal power
 
@@ -312,7 +316,7 @@ for name, props in coatings.items():
         "energy_kWh": energy_kWh
     })
 
-    print(f"{name}: {energy_kWh:.2f} kWh/year at {power:.0f} W Heater Power")
+    print(f"{name}: {energy_kWh:.2f} kWh/year at optimal heater power: {power:.0f} W")
 
 #storing results and analysis
 in_band_fraction = {name: np.mean((data["T"] >= threshold_low) & (data["T"] <= threshold_high))
@@ -380,16 +384,19 @@ print(f"\n→ Best balanced choice: {best_balanced}")
 #window around eclipse season for plotting
 def plot_eclipse_season():
     plt.figure(figsize=(10, 5))
-    start_day, end_day = 45, 75
+    start_day, end_day = 44, 74
     start_idx = np.searchsorted(time_year, start_day * 86400.0)
     end_idx = np.searchsorted(time_year, end_day * 86400.0)
 
     for name, data in results.items():
-        plt.plot(time_year[start_idx:end_idx]/86400.0, data["T"][start_idx:end_idx], label=f"{name}")
+        if name != "Bare Polished Aluminum":
+            plt.plot(time_year[start_idx:end_idx]/86400.0, data["T"][start_idx:end_idx], label=f"{name}")
 
     plt.fill_between([start_day, end_day], [threshold_low, threshold_low], [threshold_high, threshold_high], 
                     color='orange', alpha=0.3)
-    plt.fill_betweenx([0,750], 60, 75, color = 'gray', alpha = 0.3)
+    plt.fill_betweenx([0,750], 59, end_day, color = 'gray', alpha = 0.3)
+    plt.xlim(start_day, end_day)
+    plt.ylim(270, 330)
     plt.xlabel("Time (days)")
     plt.ylabel("Temperature (K)")
     plt.title("Temperature Evolution – Eclipse Season")
@@ -416,22 +423,17 @@ def create_six_month_plot():
     plt.grid(True)
     return plt.gcf()
 
+dt_year = time_year[1] - time_year[0]   #600 sec
 
-# ----------------------------------------------------------
-# COMPUTE ENERGY USED IN ONE DAY DURING THE FIRST ECLIPSE
-# ----------------------------------------------------------
-
-dt_year = time_year[1] - time_year[0]   # 600 sec
-
-# We will compute worst-day energy for the *best coating*
+#we will compute worst-day energy for the best coating
 best_T = results[best_balanced]["T"]
 best_heater = results[best_balanced]["heater"]
 
-# Identify FIRST eclipse season days (59–99)
+#first eclipse season
 first_season_mask = ( (time_year/86400) > 59 ) & ( (time_year/86400) < 99 )
 
-# Identify eclipse intervals using sunlight mask == 0
-sun_mask = sunlight_interp(time_year)  # 1 = sun, 0 = eclipse
+#identify eclipse intervals
+sun_mask = sunlight_interp(time_year)  #binary  mask
 in_eclipse = (sun_mask == 0) & first_season_mask
 
 # Instantaneous heater power use
@@ -575,5 +577,4 @@ print(f"Best balanced: {best_balanced}")
 print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {results[best_balanced]['optimal_power_W']:.0f}W")
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
-
 
