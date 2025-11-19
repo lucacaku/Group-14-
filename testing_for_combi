@@ -93,14 +93,15 @@ def degradation_eff(days, optical1, cell1, cell_later):
 def load_excel_values(path):
     df = pd.read_excel(path, sheet_name="Analysis", header=None)
     idx = df[df[0] == "BEST COATING"].index[0]
-
+    global energy_worst_day
+    energy_worst_day = float(df.iloc[idx + 13, 1])
     return {
         "name": df.iloc[idx + 1, 1],
         "absorptivity": float(df.iloc[idx + 2, 1]),
         "emissivity": float(df.iloc[idx + 3, 1]),
         "heater_power": float(df.iloc[idx + 4, 1]),
         "annual_kwh": float(df.iloc[idx + 5, 1]),
-        "energy_worst_day": float(df.iloc[idx + 6, 1])
+        "energy_worst_day": float(df.iloc[idx + 13, 1])
     }
 
 
@@ -154,9 +155,8 @@ eta_sys = 0.679               # system efficiency
 eta_total = eta_panel * eta_sys   # effective conversion efficiency
 
 def surface_area(energy_heater):
-
+    global energy_J
     energy_J =  (energy_heater) + (internal_energy_use * 86400)  # J needed per day
-
     power_per_m2 = I_sun * absobtivity * eta_total * area(theta_deg)   
 
     # integrate over full day
@@ -172,8 +172,6 @@ def surface_area(energy_heater):
     print(energy_heater)
 
     return area_required_10
-
-
 
 
 # POWER TIMESERIES
@@ -238,12 +236,9 @@ if __name__ == "__main__":
     print(f"Results written successfully at rows {write_row}–{write_row+3}.")
 
 
+energy_J =  (energy_worst_day) + (internal_energy_use * 86400)
 
-
-#percentage = ((energy_heater + internal_energy_use) / (I_sun * eta_total * surface_area(energy_worst_day)))
-
-percentage = 10/100
-
+percentage = ((energy_J / 86400) / (I_sun * eta_total * absobtivity * area_required_10))
 
 A_values = area(theta_deg)
 mask = A_values < percentage * A_max
@@ -264,25 +259,6 @@ for (t1, t2) in intervals:
     print(f"From {t1:.2f} h to {t2:.2f} h")
 
 
-
-plt.figure(figsize=(10, 5))
-plt.plot(theta_deg, area(theta_deg), lw=2, label="Visible Solar Area")
-
-# Shade eclipse
-plt.axvspan(theta_eclipse_start, theta_eclipse_end, color='gray', alpha=0.3,
-            label="Eclipse (Area=0)")
-
-plt.title('Visible Solar Panel Area vs Orbital Angle')
-plt.xlabel('Orbital angle, θ (degrees)')
-plt.ylabel('Visible surface area, A (%)')
-plt.xlim(0, 360)
-plt.ylim(0, A_max * 1.05)
-plt.axhline(percentage, color='r', linestyle='--', label="Required Power")
-plt.grid(alpha=0.3)
-plt.legend()
-plt.show()
-
-
 plt.figure(figsize=(10, 5))
 plt.plot(time, area(theta_deg), lw=2, label="Visible Solar Area")
 
@@ -299,6 +275,5 @@ plt.ylim(0, A_max * 1.05)
 plt.grid(alpha=0.3)
 plt.legend()
 plt.show()
-
 
 
