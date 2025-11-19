@@ -100,7 +100,7 @@ def load_excel_values(path):
         "emissivity": float(df.iloc[idx + 3, 1]),
         "heater_power": float(df.iloc[idx + 4, 1]),
         "annual_kwh": float(df.iloc[idx + 5, 1]),
-        "energy_worst_day": float(df.iloc[idx + 13, 1])
+        "energy_worst_day": float(df.iloc[idx + 6, 1])
     }
 
 
@@ -162,12 +162,14 @@ def surface_area(energy_heater):
     # integrate over full day
     dt = 86400 / len(power_per_m2)
     energy_per_m2_day = np.sum(power_per_m2) * dt     # J per m² per day
-
+    global area_required 
     area_required = energy_J / energy_per_m2_day
 
     # 10% margin
+    global area_required_10
     area_required_10 = area_required * 1.10
-
+    
+    print(energy_heater)
 
     return area_required_10
 
@@ -184,63 +186,45 @@ def power_timeseries(df_eff, area, absorbed_per_m2):
 # MAIN
 
 def main():
-    # Look for Excel file in parent directory
     parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
     excel_files = glob.glob(excel_pattern)
-    
+
     if not excel_files:
         raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
-    
+
     excel_path = max(excel_files, key=os.path.getctime)
     vals = load_excel_values(excel_path)
-    energy_worst_day = vals["energy_worst_day"]
-
 
     cfg = ModelConfig()
     df_eff = build_efficiency(cfg)
 
-    area, absorbed = surface_area(energy_worst_day), I_sun * vals["absorptivity"]
-    
-
-    df = power_timeseries(df_eff, area, absorbed)
-    return df, area, energy_worst_day
+    return df_eff, area, worst_eff, worst_year, usable_power, excel_path
 
 
 if __name__ == "__main__":
-    df_out, panel_area, energy_worst_day = main()
-
-    # WRITE PANEL AREA BACK TO EXCEL
-    
-    parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    excel_pattern = os.path.join(parent_dir, "satellite_analysis*.xlsx")
-    excel_files = glob.glob(excel_pattern)
-    
-    if not excel_files:
-        raise FileNotFoundError(f"No satellite_analysis*.xlsx files found in {parent_dir}")
-    
-    excel_path = max(excel_files, key=os.path.getctime)
+    df_out, panel_area, worst_eff, worst_year, usable_power, excel_path = main()
 
     wb = load_workbook(excel_path)
     ws = wb["Analysis"]
 
-    best_idx = None
-    for row in ws.iter_rows():
-        if row[0].value == "BEST COATING":
-            best_idx = row[0].row
-            break
+    write_row = 44  # fixed row
 
-    if best_idx is None:
-        raise ValueError("Could not find 'BEST COATING' in column A.")
+    ws[f"A{write_row}"] = "Worst Efficiency"
+    ws[f"B{write_row}"] = float(worst_eff)
 
-    write_row = best_idx + 6
+    ws[f"A{write_row+1}"] = "Worst Year"
+    ws[f"B{write_row+1}"] = int(worst_year)
 
-    ws[f"A{write_row}"] = "Required Panel Area (m²)"
-    ws[f"B{write_row}"] = float(panel_area)
+    ws[f"A{write_row+2}"] = "Required Panel Area (m²)"
+    ws[f"B{write_row+2}"] = float(area_required_10)
+
+    ws[f"A{write_row+3}"] = "Usable Power (W)"
+    ws[f"B{write_row+3}"] = float(usable_power)
 
     wb.save(excel_path)
 
-    print(f"Panel area written successfully at row {write_row}: {panel_area:.4f} m²")
+    print(f"Results written successfully at rows {write_row}–{write_row+3}.")
 
 
 
@@ -264,9 +248,9 @@ if len(indices) > 0:
             start = indices[i]
     intervals.append((time[start], time[indices[-1]]))
 
-# print("Intervals when battery is needed:")
-# for (t1, t2) in intervals:
-#     print(f"From {t1:.2f} h to {t2:.2f} h")
+print("Intervals when battery is needed:")
+for (t1, t2) in intervals:
+    print(f"From {t1:.2f} h to {t2:.2f} h")
 
 
 
@@ -304,4 +288,9 @@ plt.ylim(0, A_max * 1.05)
 plt.grid(alpha=0.3)
 plt.legend()
 plt.show()
+
+
+
+
+#10000W - INTERNAL ENERGY
 
