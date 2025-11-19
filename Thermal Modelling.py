@@ -294,7 +294,7 @@ plt.title("Heater Energy vs Heater Power for All Coatings")
 plt.grid(True)
 plt.legend()
 plt.tight_layout()
-plt.show()
+#plt.show()
 
 coatings['Zerlauts S-13G White Paint']['power'] = min_power_1
 coatings['Ta2O5, SiN, SiO2 Film']['power'] = min_power_2
@@ -578,3 +578,4 @@ print(f"  → Energy: {results[best_balanced]['energy_kWh']:.2f} kWh/year at {re
 print(f"  → Performance: {in_band_fraction[best_balanced]*100:.2f}% in-band")
 print("\nExport complete!")
 
+plt.show()
