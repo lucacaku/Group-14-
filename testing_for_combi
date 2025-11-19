@@ -199,6 +199,17 @@ def main():
     cfg = ModelConfig()
     df_eff = build_efficiency(cfg)
 
+    # Calculate worst efficiency and year
+    worst_eff = df_eff["total_eff"].min()
+    worst_idx = df_eff["total_eff"].idxmin()
+    worst_year = worst_idx.year
+    
+    # Calculate panel area from energy requirements
+    area = surface_area(vals["energy_worst_day"])
+    
+    # Calculate usable power (area * solar intensity * efficiency * absorptivity)
+    usable_power = area * I_sun * absobtivity * eta_total
+
     return df_eff, area, worst_eff, worst_year, usable_power, excel_path
 
 
@@ -290,7 +301,4 @@ plt.legend()
 plt.show()
 
 
-
-
-#10000W - INTERNAL ENERGY
 
