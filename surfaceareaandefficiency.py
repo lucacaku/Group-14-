@@ -100,7 +100,7 @@ def load_excel_values(path):
         "emissivity": float(df.iloc[idx + 3, 1]),
         "heater_power": float(df.iloc[idx + 4, 1]),
         "annual_kwh": float(df.iloc[idx + 5, 1]),
-        "energy_worst_day": float(df.iloc[idx + 6, 1])
+        "energy_worst_day": float(df.iloc[idx + 13, 1])
     }
 
 
@@ -145,7 +145,7 @@ def build_efficiency(cfg):
 # PANEL AREA (USING USABLE POWER = +10%)
 
 
-internal_energy_use = 0000 # W
+internal_energy_use = 10000 # W
 
 I_sun = 1361.0               # W/m²
 absobtivity = 0.86            # solar cell absorptivity
@@ -168,7 +168,6 @@ def surface_area(energy_heater):
     # 10% margin
     area_required_10 = area_required * 1.10
 
-    print(energy_heater)
 
     return area_required_10
 
@@ -265,9 +264,9 @@ if len(indices) > 0:
             start = indices[i]
     intervals.append((time[start], time[indices[-1]]))
 
-print("Intervals when battery is needed:")
-for (t1, t2) in intervals:
-    print(f"From {t1:.2f} h to {t2:.2f} h")
+# print("Intervals when battery is needed:")
+# for (t1, t2) in intervals:
+#     print(f"From {t1:.2f} h to {t2:.2f} h")
 
 
 
