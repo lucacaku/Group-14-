@@ -8,16 +8,16 @@ import io
 from tqdm import tqdm
 
 #define constants and parameters
-sigma = 5.67e-8
-solar_constant = 1361
-albedo = 0.3
-Gravitational_constant = 6.67430e-11
-mass_of_earth = 5.972e24
+sigma = 5.67e-8 #Stefan-Boltzmann constant
+solar_constant = 1361 # W/m²
+albedo = 0.3 #Earth average albedo
+Gravitational_constant = 6.67430e-11 # m³/kg·s²
+mass_of_earth = 5.972e24 # kg
 
-threshold_low = 283
+threshold_low = 283 
 threshold_high = 323
 average_threshold = (threshold_low + threshold_high) / 2.0
-c = 900.0  #specific heat capacity J/(kg·K)
+c = 900.0 #specific heat capacity J/kg·K (aluminium)
 
 #user defined satellite geometry and mass plus error handling to prevent unrealistic values
 def _get_float_input(prompt, min_val, max_val):
@@ -49,11 +49,11 @@ coatings = {
 }
 
 #define orbital parameters and time arrays
-altitude = 35786e3
-earth_radius = 6371e3
-year_seconds = 365.25 * 24 * 3600
+altitude = 35786e3 # m
+earth_radius = 6371e3 # m
+year_seconds = 365.25 * 24 * 3600 # seconds in a year
 
-orbital_radius = earth_radius + altitude
+orbital_radius = earth_radius + altitude 
 orbital_period = 2 * np.pi * np.sqrt(orbital_radius**3 / (Gravitational_constant * mass_of_earth)) #Keplers 3rd law (~23.93 hours)
 
 dt = 10 * 60 #small timestep so accurate, not too small to be slow
@@ -63,7 +63,7 @@ simulation_end = 365 * 24 * 3600
 time_orbit = np.linspace(0, orbital_period, 1000)
 time_year = np.linspace(0, year_seconds, int(year_seconds / dt))
 
-time_sweep_days = 3
+time_sweep_days = 3 #short time around eclipse to test heater powers
 time_sweep = np.arange(79*24*3600, (79 + time_sweep_days) * 24 * 3600, dt) 
 
 #eclipse and area functions
@@ -95,6 +95,7 @@ def set_interps_for(time_array):
     A_earth_orbit = np.pi * (earth_radius**2) * (1 - np.cos(half_angle_earth))
     A_earth = A_earth_orbit * sunlight
 
+    # interpolating functions for thermal calculations
     A_pres_interp = interp1d(time_array, A_presented, kind='linear', fill_value='extrapolate')
     sunlight_interp = interp1d(time_array, sunlight, kind='nearest', fill_value='extrapolate')
     A_earth_interp = interp1d(time_array, A_earth, kind='nearest', fill_value='extrapolate')
@@ -111,10 +112,10 @@ def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
     Q_albedo = width * height * solar_constant * alpha * albedo * (A_earth_local / (4.0 * np.pi * orbital_radius**2)) 
     Q_ir_loss = epsilon * sigma * (T**4) * A_pres
 
-    if T < average_threshold: #heater turns on at low threshold, off at high threshold
+    if T < average_threshold: #heater turns on below average threshold
         heater_state = 1
-    elif T >= average_threshold:
-        heater_state = 0 #not threshold_high - delta, prevents energy waste by rapid switching
+    elif T >= average_threshold: #heater turns off above average threshold
+        heater_state = 0 
 
     Q_heater = heater_power * heater_state
     Q_net = Q_solar + Q_albedo + Q_heater - Q_ir_loss
@@ -122,7 +123,8 @@ def thermal_rhs(t, T, alpha, epsilon, heater_state, heater_power):
 
     return dTdt, heater_state, Q_heater
 
-def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_init=average_threshold): #runge-kutta 4th order
+# runge-kutta 4th order
+def heat_balance_RK4_with_heater(alpha, epsilon, time_array, heater_power, T_init=average_threshold): 
     n = len(time_array)
     T = np.zeros(n)
     heater_state = np.zeros(n)
@@ -163,7 +165,6 @@ for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
     results[name] = {}
     energy_vs_power = []  # store total heater energy for each power level
 
-    # print(f"\n=== {name} ===")
     for power in heater_powers:
         def thermal_rhs_power(t, T, alpha=alpha, epsilon=epsilon, heater_state=0):
             T = float(T)
@@ -218,15 +219,13 @@ for name, props in tqdm(list(coatings.items()), desc="Optimising Coatings"):
     results[name]["heater_powers"] = heater_powers
     results[name]["energy_vs_power"] = energy_vs_power
 
-
-
-
+# Data cleaning to remove near-linear sections (heater does not heat enough)
 
 for name in results:
     hp = np.array(results[name]["heater_powers"])
     evp = np.array(results[name]["energy_vs_power"])
 
-    if len(evp)/4 < 2:
+    if len(evp)/4 < 2: #don't check all data points
         continue
 
     slope = evp[1] - evp[0]
@@ -236,7 +235,7 @@ for name in results:
     for i in range(len(evp)):
         expected = slope * i
 
-        if abs(evp[i] - expected) < 5:
+        if abs(evp[i] - expected) < 5: #5 kWh tolerance
             mask[i] = False
 
     hp_clean = hp[mask]
@@ -245,7 +244,7 @@ for name in results:
     results[name]["heater_powers"] = hp_clean
     results[name]["energy_vs_power"] = evp_clean
 
-
+# find optimal heater power for each coating
 for name in results:
     hp = results[name]["heater_powers"]
     evp = results[name]["energy_vs_power"]
