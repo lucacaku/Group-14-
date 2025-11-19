@@ -502,10 +502,7 @@ output_data.append(['Avg Deviation Above', f"{avg_above:.2f}", 'K'])
 output_data.append(['Max Deviation Above', f"{max_above:.2f}", 'K'])
 output_data.append(['Energy in a day', f"{energy_worst_day:.2f}", 'J'])
 output_data.append(['', '', ''])
-energy_worst_day=0
 
-output_data.append(['Energy in a day', f"{energy_worst_day:.2f}", 'J'])
-output_data.append(['', '', ''])
 
 #comparison of all coatings
 output_data.append(['ALL COATINGS COMPARISON', '', ''])
