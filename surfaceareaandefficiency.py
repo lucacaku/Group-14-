@@ -132,7 +132,8 @@ def build_timeseries(cfg: ModelConfig) -> pd.DataFrame:
 
 
 def annual_summary(df: pd.DataFrame) -> pd.DataFrame:
-    out = df["total_eff"].resample("Y").agg(["min", "mean", "max"])
+    # use 'YE' (year end) resampling to avoid deprecation of 'Y'
+    out = df["total_eff"].resample("YE").agg(["min", "mean", "max"])
     # Replace index with 1..N mission years
     out.index = np.arange(1, len(out) + 1)
     out.index.name = "mission_year"
@@ -170,9 +171,9 @@ def plot_total_with_regressed_degradation(df: pd.DataFrame, cfg: ModelConfig) ->
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.3)
 
-    # annotate regression
-    slope = float(model.coef_[0])
-    intercept = float(model.intercept_)
+    # annotate regression: extract scalars safely from possible array values
+    slope = float(np.asarray(model.coef_).ravel()[0])
+    intercept = float(np.asarray(model.intercept_).ravel()[0])
     xpos = t_mission[int(max(1, N * 0.02))]
     ypos = max(total_regressed) * 0.98
     plt.text(xpos, ypos, f"deg = {slope:.6f}·t + {intercept:.6f}\n(t in years)",
@@ -195,8 +196,8 @@ def plot_degradation_15yr_with_regression(df: pd.DataFrame, cfg: ModelConfig) ->
     model = LinearRegression().fit(t_for_reg, deg_daily)
     deg_pred = model.predict(t_for_reg)
 
-    slope = float(model.coef_[0])
-    intercept = float(model.intercept_)
+    slope = float(np.asarray(model.coef_).ravel()[0])
+    intercept = float(np.asarray(model.intercept_).ravel()[0])
 
     plt.figure(figsize=(12, 5))
     plt.plot(t_mission, deg_daily, label="Daily degradation", linewidth=0.9, alpha=0.8)
@@ -485,4 +486,3 @@ os.remove("solar_eff_daily_2025_2039.csv")
 os.remove("solar_eff_total_with_regressed_degradation.png")
 os.remove("solar_eff_annual_summary.csv")
 os.remove("solar_eff_10yr_degradation_regression.png")
-
