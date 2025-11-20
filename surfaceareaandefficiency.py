@@ -1,12 +1,3 @@
-"""
-Modified script:
-- Recursively searches for 'satellite_analysis*.xlsx' starting from current working directory.
-- Writes annual table (mission_year, min, mean, max) to Analysis sheet.
-- Writes Worst Efficiency, Worst Year (calendar year only), Required Panel Area (m^2) to Analysis sheet.
-- Exports each plot into its own worksheet (no overlay).
-- Reads absorptivity from Analysis sheet (falls back to default if not found).
-"""
-
 from sklearn.linear_model import LinearRegression
 import numpy as np
 import pandas as pd
@@ -369,7 +360,7 @@ def main():
 
     # Plots (mission-year x-axis)
     p1 = plot_total_with_regressed_degradation(df, cfg)
-    p2 = 5(df, cfg)
+    p2 = plot_degradation_15yr_with_regression(df, cfg)
 
     # Worst-efficiency and timestamp
     worst_eff = float(df["total_eff"].min())
@@ -494,3 +485,4 @@ os.remove("solar_eff_daily_2025_2039.csv")
 os.remove("solar_eff_total_with_regressed_degradation.png")
 os.remove("solar_eff_annual_summary.csv")
 os.remove("solar_eff_10yr_degradation_regression.png")
+
