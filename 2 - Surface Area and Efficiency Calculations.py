@@ -238,7 +238,7 @@ def export_to_excel(excel_path, annual_df: pd.DataFrame, plot_paths, analysis_wr
 
     # Add each plot to its own worksheet so they never overlap
     for idx, p in enumerate(plot_paths, start=1):
-        sheet_name = f"Plot_{idx}"
+        sheet_name = f"Efficiency_Plot_{idx}"
         # replace existing if present
         if sheet_name in wb.sheetnames:
             ws_plot = wb[sheet_name]
@@ -479,12 +479,11 @@ ws_area.add_image(img, "A1")
 excel_wb.save(excel_path)
 excel_wb.close()
 
-print("Export complete!")
+print("Export complet!")
 
 os.remove("area_plot.png")
 os.remove("solar_eff_daily_2025_2039.csv")
 os.remove("solar_eff_total_with_regressed_degradation.png")
 os.remove("solar_eff_annual_summary.csv")
 os.remove("solar_eff_10yr_degradation_regression.png")
-
 
