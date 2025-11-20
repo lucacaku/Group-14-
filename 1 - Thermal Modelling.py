@@ -294,6 +294,7 @@ plt.title("Heater Energy vs Heater Power for All Coatings")
 plt.grid(True)
 plt.legend()
 plt.tight_layout()
+#plt.gcf()
 #plt.show()
 
 coatings['Zerlauts S-13G White Paint']['power'] = min_power_1
@@ -536,10 +537,15 @@ from openpyxl.drawing.image import Image as XLImage
 wb = load_workbook(excel_file)
 
 #create graphs
+fig_power = plt.gcf()
 fig_eclipse = plot_eclipse_season()
 fig_six = create_six_month_plot()
 
 #save figures to bytes
+img_power = io.BytesIO()
+fig_power.savefig(img_power, format='png', dpi=100)
+img_power.seek(0)
+plt.close(fig_power)
 img_eclipse = io.BytesIO()
 fig_eclipse.savefig(img_eclipse, format='png', dpi=100)
 img_eclipse.seek(0)
@@ -550,10 +556,12 @@ img_six.seek(0)
 plt.close(fig_six)
 
 #add graph sheets
+ws_power = wb.create_sheet('Power Graph')
 ws_eclipse = wb.create_sheet('Eclipse Season Graph')
 ws_six = wb.create_sheet('Six Month Graph')
 
 #populate sheets with images
+ws_power.add_image(XLImage(img_power), 'A1')
 ws_eclipse.add_image(XLImage(img_eclipse), 'A1')
 ws_six.add_image(XLImage(img_six), 'A1')
 
