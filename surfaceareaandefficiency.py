@@ -132,9 +132,7 @@ def build_timeseries(cfg: ModelConfig) -> pd.DataFrame:
 
 
 def annual_summary(df: pd.DataFrame) -> pd.DataFrame:
-    # use 'YE' (year end) resampling to avoid deprecation of 'Y'
     out = df["total_eff"].resample("YE").agg(["min", "mean", "max"])
-    # Replace index with 1..N mission years
     out.index = np.arange(1, len(out) + 1)
     out.index.name = "mission_year"
     return out
@@ -171,7 +169,7 @@ def plot_total_with_regressed_degradation(df: pd.DataFrame, cfg: ModelConfig) ->
     plt.legend()
     plt.grid(True, linestyle="--", alpha=0.3)
 
-    # annotate regression: extract scalars safely from possible array values
+    # annotate regression
     slope = float(np.asarray(model.coef_).ravel()[0])
     intercept = float(np.asarray(model.intercept_).ravel()[0])
     xpos = t_mission[int(max(1, N * 0.02))]
@@ -486,3 +484,4 @@ os.remove("solar_eff_daily_2025_2039.csv")
 os.remove("solar_eff_total_with_regressed_degradation.png")
 os.remove("solar_eff_annual_summary.csv")
 os.remove("solar_eff_10yr_degradation_regression.png")
+
