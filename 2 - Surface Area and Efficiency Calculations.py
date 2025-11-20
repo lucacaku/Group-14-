@@ -479,11 +479,12 @@ ws_area.add_image(img, "A1")
 excel_wb.save(excel_path)
 excel_wb.close()
 
-print("Export complet!")
+print("Export complete!")
 
 os.remove("area_plot.png")
 os.remove("solar_eff_daily_2025_2039.csv")
 os.remove("solar_eff_total_with_regressed_degradation.png")
 os.remove("solar_eff_annual_summary.csv")
 os.remove("solar_eff_10yr_degradation_regression.png")
+
 
