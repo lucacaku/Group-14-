@@ -1,5 +1,3 @@
-# full_script_modified.py
-# -*- coding: utf-8 -*-
 """
 Modified script:
 - Recursively searches for 'satellite_analysis*.xlsx' starting from current working directory.
@@ -21,17 +19,15 @@ import glob
 import os
 import matplotlib.pyplot as plt
 
-# ---------------------------
-# Small panel geometry helpers
-# ---------------------------
+# solar panel geometry
 A_max = 1.0
 A_min = 0.0
 
 theta_deg = np.linspace(0, 360, 1000)
-time = theta_deg / 15.0  # angle -> hours
+time = theta_deg / 15.0  # angle(degrees) to hours
 
-# === Worst Day Eclipse (GEO) ===
-eclipse_duration_h = 1.18        # 70.8 minutes
+# eclipse during worse day
+eclipse_duration_h = 1.18       
 eclipse_half_angle = (eclipse_duration_h / 24 * 360) / 2
 theta_eclipse_start = 180 - eclipse_half_angle
 theta_eclipse_end = 180 + eclipse_half_angle
@@ -39,23 +35,20 @@ theta_eclipse_end = 180 + eclipse_half_angle
 t_eclipse_start = theta_eclipse_start / 15.0
 t_eclipse_end = theta_eclipse_end / 15.0
 
+# sunlight mask
 sunlight_mask = np.where(
     (theta_deg >= theta_eclipse_start) & (theta_deg <= theta_eclipse_end),
     0.0,
     1.0
 )
 
-
+# percentage visibility of solar panels function
 def area(theta_deg_local):
-    """Visible solar area fraction as function of panel rotation angle (0..360)."""
     theta_rad = np.deg2rad(theta_deg_local)
     A = (A_max - A_min) * np.abs(np.cos(theta_rad)) + A_min
     return A * sunlight_mask
 
 
-# ---------------------------
-# CONFIG
-# ---------------------------
 @dataclass
 class ModelConfig:
     start_year: int = 2025
@@ -73,15 +66,9 @@ class ModelConfig:
     smooth_days: int = 120
 
 
-# ---------------------------
-# Helper functions
-# ---------------------------
+# helper functions
 def to_doy(dates):
-    """
-    Robust conversion to day-of-year.
-    Accepts: single datetime, list/array of datetimes, numpy datetime64, pandas Timestamp/Index.
-    Returns scalar int for single date or numpy array of ints for sequences.
-    """
+
     dates = pd.to_datetime(dates)
 
     if isinstance(dates, pd.Timestamp):
@@ -89,7 +76,7 @@ def to_doy(dates):
     # DatetimeIndex
     return dates.dayofyear.values
 
-
+# all efficiency components
 def solar_distance_eff(n, amp=0.033, shift=3):
     n = np.asarray(n, dtype=float)
     return 1.0 + amp * np.cos(2 * np.pi * (n - shift) / 365.0)
@@ -122,9 +109,7 @@ def degradation_eff(day_index,
     return optical * cells
 
 
-# ---------------------------
-# Core model builder
-# ---------------------------
+# combine all to build timeseries
 def build_timeseries(cfg: ModelConfig) -> pd.DataFrame:
     start_date = datetime(cfg.start_year, 1, 1)
     total_days = cfg.years * 365
@@ -163,9 +148,7 @@ def annual_summary(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# ---------------------------
-# Plots (mission-year x-axis)
-# ---------------------------
+# plotting functions
 def plot_total_with_regressed_degradation(df: pd.DataFrame, cfg: ModelConfig) -> str:
     path = f"{cfg.out_prefix}_total_with_regressed_degradation.png"
 
@@ -210,7 +193,7 @@ def plot_total_with_regressed_degradation(df: pd.DataFrame, cfg: ModelConfig) ->
     return path
 
 
-def plot_degradation_10yr_with_regression(df: pd.DataFrame, cfg: ModelConfig) -> str:
+def plot_degradation_15yr_with_regression(df: pd.DataFrame, cfg: ModelConfig) -> str:
     path = f"{cfg.out_prefix}_10yr_degradation_regression.png"
 
     N = len(df)
@@ -240,16 +223,9 @@ def plot_degradation_10yr_with_regression(df: pd.DataFrame, cfg: ModelConfig) ->
     return path
 
 
-# ---------------------------
-# Excel export helper
-# ---------------------------
+# exporting to excel
 def export_to_excel(excel_path, annual_df: pd.DataFrame, plot_paths, analysis_write_row=44):
-    """
-    Writes annual_df (mission-year index) to Analysis sheet and inserts PNGs each on its own worksheet.
-    - annual_df: DataFrame with index = mission years (1..N) and columns min/mean/max
-    - plot_paths: list of file paths to PNG images
-    - analysis_write_row: row where worst-eff etc. will be written (we overwrite there)
-    """
+
     wb = load_workbook(excel_path)
     # Ensure Analysis sheet exists
     if "Analysis" not in wb.sheetnames:
@@ -285,10 +261,7 @@ def export_to_excel(excel_path, annual_df: pd.DataFrame, plot_paths, analysis_wr
     wb.close()
 
 
-# ---------------------------
-# Panel area & power helpers
-# ---------------------------
-# Constants for panel area calculation (defaults; overwritten by sheet values where available)
+# constants for the solar panel area calculation
 internal_energy_use = 10000  # W
 I_sun = 1361.0  # W/m^2
 absorptivity = 0.86  # default if not present in sheet
@@ -296,7 +269,7 @@ eta_panel = 0.40
 eta_sys = 0.6037
 eta_total = eta_panel * eta_sys
 
-
+# surface area calculation
 def surface_area(energy_heater):
     global energy_J
     energy_J =  (energy_heater) + (internal_energy_use * 86400)  # J needed per day
@@ -312,20 +285,12 @@ def surface_area(energy_heater):
     global area_required_10
     area_required_10 = area_required * 1.10
     
-    print(energy_heater)
 
     return area_required_10
 
 
-# ---------------------------
-# Excel-reading of input values
-# ---------------------------
+# excel reading
 def load_excel_values(path):
-    """
-    Attempts to read required small inputs from Analysis sheet.
-    The routine looks for a cell containing 'BEST COATING' and reads values relative to it.
-    If that finder fails, it attempts some sensible defaults/locations.
-    """
     df = pd.read_excel(path, sheet_name="Analysis", header=None)
     # Try to find 'BEST COATING' label (case-insensitive)
     try:
@@ -349,16 +314,12 @@ def load_excel_values(path):
         global energy_worst_day
         energy_worst_day = safe_get(idx + 13, 1, np.nan)
     else:
-        # fallback: try some common places or defaults
         #absorptivity = absorptivity
         energy_worst_day = np.nan
         name = ""
         emissivity = np.nan
         heater_power = np.nan
         annual_kwh = np.nan
-
-        # try a simple heuristic: find the first numeric cell labeled 'energy_worst_day' or similar
-        # but we keep simple: user will likely have BEST COATING row; otherwise we ask them to adapt.
 
     # ensure floats where needed
     try:
@@ -367,8 +328,7 @@ def load_excel_values(path):
         # if not present, try to compute from annual_kwh if present (kWh/day -> J/day)
         try:
             if not np.isnan(annual_kwh):
-                # assume annual_kwh is kWh per year? unclear; fallback: leave NaN
-                energy_worst_day = float(annual_kwh) * 1000.0  # rough guess (kWh -> Wh)
+                energy_worst_day = float(annual_kwh) * 1000.0  
             else:
                 energy_worst_day = np.nan
         except Exception:
@@ -384,9 +344,6 @@ def load_excel_values(path):
     }
 
 
-# ---------------------------
-# MAIN
-# ---------------------------
 def main():
     # recursively search current working directory for 'satellite_analysis*.xlsx'
     cwd = os.getcwd()
@@ -410,20 +367,13 @@ def main():
     ann = annual_summary(df)
     ann.to_csv(f"{cfg.out_prefix}_annual_summary.csv")
 
-    print(f"[OK] Saved daily CSV -> {csv_daily}")
-    print(f"[OK] Saved annual summary -> {cfg.out_prefix}_annual_summary.csv")
-    print("\nAnnual min/mean/max:")
-    print(ann.round(4))
-
     # Plots (mission-year x-axis)
     p1 = plot_total_with_regressed_degradation(df, cfg)
-    p2 = plot_degradation_10yr_with_regression(df, cfg)
-    print(f"[OK] Saved plots -> {p1}, {p2}")
+    p2 = 5(df, cfg)
 
     # Worst-efficiency and timestamp
     worst_eff = float(df["total_eff"].min())
-    worst_idx = df["total_eff"].idxmin()  # pandas Timestamp
-    # calendar year only (user asked for YEAR only)
+    worst_idx = df["total_eff"].idxmin()  
     worst_calendar_year = int(pd.to_datetime(worst_idx).year)
 
     # Panel area from energy requirement (we expect energy_worst_day as J/day)
@@ -453,12 +403,9 @@ def main():
     # Save workbook after writing summary facts
     wb.save(excel_path)
     wb.close()
-    print(f"Results written successfully at rows {write_row}–{write_row + 2} in {excel_path}")
 
     # Export annual table + plots into same Excel workbook (annual table at row 10 + plots in separate sheets)
     export_to_excel(excel_path, ann, [p1, p2])
-
-    print("Annual table and plots exported into Excel (plots on separate sheets).")
 
     # also return key values
     return {
@@ -476,22 +423,18 @@ def main():
 if __name__ == "__main__":
     out = main()
     # simple confirmation print
-    print("Done. Outputs:")
-    print(f" - Excel: {out['excel_path']}")
-    print(f" - Plots: {out['plots']}")
     print(f" - Panel area (m^2): {out['panel_area_m2']:.3f}")
-    print(f" - Usable power (W): {out['usable_power_W']:.1f}")
-    print(f" - Worst eff: {out['worst_eff']:.6f} in year {out['worst_calendar_year']}")
 
 
+# percentage area calculation where battery is needed
 energy_J =  (energy_worst_day) + (internal_energy_use * 86400)
-
 percentage = ((energy_J / 86400) / (I_sun * eta_total * absorptivity * area_required_10))
 
 A_values = area(theta_deg)
 mask = A_values < percentage * A_max
 indices = np.where(mask)[0]
 
+# root finding intervals
 intervals = []
 if len(indices) > 0:
     start = indices[0]
@@ -510,7 +453,7 @@ for (t1, t2) in intervals:
 plt.figure(figsize=(10, 5))
 plt.plot(time, area(theta_deg), lw=2, label="Visible Solar Area")
 
-# Shade eclipse
+# shade eclipse
 plt.axvspan(t_eclipse_start, t_eclipse_end, color='gray', alpha=0.3,
             label="Eclipse (Area=0)")
 
@@ -518,17 +461,18 @@ plt.title('Visible Solar Panel Area vs Time')
 plt.xlabel('Time, t (Hours)')
 plt.ylabel('Visible surface area, A (%)')
 plt.axhline(percentage, color='r', linestyle='--', label="Required Power")
+# above the red dotted line the batttery is charging
+# below it the battery is being used
 plt.xlim(0, 24)
 plt.ylim(0, A_max * 1.05)
 plt.grid(alpha=0.3)
 plt.legend()
-# ---- SAVE AREA PLOT AND EXPORT TO EXCEL ----
-# Save PNG
+
+# export to excel
 area_plot_path = "area_plot.png"
 plt.savefig(area_plot_path, dpi=200, bbox_inches='tight')
 plt.close()
 
-# Export to Excel (add image to a new sheet)
 excel_wb = load_workbook(excel_path)
 
 sheet_name = "Area_Plot"
@@ -543,7 +487,7 @@ ws_area.add_image(img, "A1")
 excel_wb.save(excel_path)
 excel_wb.close()
 
-print("Area plot exported to Excel sheet: Area_Plot")
+print("Export complet!")
 
 os.remove("area_plot.png")
 os.remove("solar_eff_daily_2025_2039.csv")
